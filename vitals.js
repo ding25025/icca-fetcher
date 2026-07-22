@@ -102,6 +102,10 @@ const DEFAULTS = {
   lockTimeoutMs: 3000,
   windowMinutes: 5,
   timesInUtc: false,
+  // 表號錨點快取檔；刪掉只會讓下次重新完整掃描
+  anchorCacheFile: '.ring-anchors.json',
+  // 一張表涵蓋幾小時（用來從錨點推算表號）
+  hoursPerTable: 1,
   // 每床每分鐘每個參數只留最新一筆；設 false 則原始逐筆全撈
   perMinute: true,
   displayTimezoneOffsetHours: 8,
@@ -403,6 +407,70 @@ async function discoverParameterIds(pool, sqlText) {
   return out;
 }
 
+// ---------- 表號錨點快取 ----------
+// 記住「某張表對應某個 DB 時刻」，下次就能用算的，不必再掃 26 張表。
+// 這是純快取，刪掉只會讓下一次退回完整掃描，不影響正確性。
+
+function loadAnchors(file) {
+  try {
+    return JSON.parse(fs.readFileSync(path.resolve(process.cwd(), file), 'utf8'));
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveAnchors(file, anchors) {
+  try {
+    fs.writeFileSync(path.resolve(process.cwd(), file), JSON.stringify(anchors, null, 2), 'utf8');
+  } catch (e) {
+    console.warn(`  ⚠ 無法寫入表號快取 ${file}：${e.message}（不影響結果，只是下次要重新掃描）`);
+  }
+}
+
+/**
+ * 找出目前的 head。
+ *
+ * 快路徑：用快取的錨點推算表號，只查那一張（外加前一張供跨時段用）。
+ *         1 次查詢，而不是 26 次。
+ * 慢路徑：沒有錨點、或推算結果對不上時，做完整掃描並重新記下錨點。
+ *
+ * 回傳 { head, stats, scanned }。stats 只含查過的表——夠 tablesForWindow 用即可。
+ */
+async function locateHead(pool, ringCfg, anchor, windowMinutes) {
+  const perHours = ringCfg.hoursPerTable || 1;
+  const allTables = ring.buildTableNames(ringCfg);
+
+  // 時間窗超過一個時段就會跨到更前面的表，這種情況直接完整掃描比較單純
+  const windowFits = windowMinutes <= perHours * 60;
+
+  if (anchor && windowFits) {
+    const guess = ring.predictIndex(anchor, new Date(Date.now() + (anchor.clockOffsetMs || 0)), ringCfg);
+    if (guess != null) {
+      // 推算的那張 + 前一張，一次查詢就拿到（scanRing 內部用 UNION ALL）
+      const prev = (guess - 1 + ringCfg.count) % ringCfg.count;
+      const subset = [guess, prev].map((i) => ({ index: i, table: ring.tableNameFor(i, ringCfg) }));
+      const partial = await ring.scanRing(pool, subset, ringCfg);
+      const dbNow = ring.dbNowOf(partial);
+      const cand = partial.find((s) => s.index === guess);
+      if (ring.isPlausibleHead(cand, dbNow, ringCfg)) {
+        // 已經是由新到舊，直接用；不能丟給 orderFromHead，它會把子集長度當成環的大小
+        const ordered = [cand, partial.find((s) => s.index === prev)].filter(Boolean);
+        return { head: cand, ordered, scanned: false, dbNow };
+      }
+    }
+  }
+
+  // 退回完整掃描
+  const stats = await ring.scanRing(pool, allTables, ringCfg);
+  const head = ring.findHead(stats);
+  return {
+    head,
+    ordered: head ? ring.orderFromHead(stats, head.index, 'newToOld') : [],
+    scanned: true,
+    dbNow: ring.dbNowOf(stats),
+  };
+}
+
 // ---------- 挑出「這段時間窗」需要查的資料表 ----------
 /**
  * 從 head 往回走，把區間與 [windowStart, ∞) 有交集的表都收進來。
@@ -496,12 +564,12 @@ function shiftTimes(row, offsetHours) {
 }
 
 // ---------- 單一站台 ----------
-async function runSite(site, settings, args, registry) {
+async function runSite(site, settings, args, registry, anchors) {
   const name = site.name;
   const windowMinutes = args.window || settings.windowMinutes || 5;
   const timeout = settings.queryTimeoutMs || 60000;
   // 排程高頻執行：關掉 COUNT(*)，掃描只留有索引的 MAX/MIN
-  const ringCfg = { withCounts: false, ...(settings.ring || {}), ...(site.ring || {}) };
+  const ringCfg = { withCounts: false, hoursPerTable: settings.hoursPerTable, ...(settings.ring || {}), ...(site.ring || {}) };
 
   // parameterId 的來源，由高到低：
   //   --param 直接指定 > --params-file / 設定檔 parameterIdsFile > 站台 parameterIds > 全域 parameterIds
@@ -571,19 +639,31 @@ async function runSite(site, settings, args, registry) {
   try {
     const tables = ring.buildTableNames(ringCfg);
     const tScan = Date.now();
-    const stats = await ring.scanRing(pool, tables, ringCfg);
+    const anchorKey = `${cdsConn.server}/${cdsConn.database}`;
+    const located = await locateHead(pool, ringCfg, anchors[anchorKey], windowMinutes);
     const scanMs = Date.now() - tScan;
-    const head = ring.findHead(stats);
+    const { head, ordered, scanned } = located;
     if (!head) throw new Error('所有環狀表都沒有資料，無法判斷寫入頭');
 
-    const ordered = ring.orderFromHead(stats, head.index, 'newToOld');
+    // 完整掃描過就更新錨點，下次才用得到快路徑
+    if (scanned && located.dbNow) {
+      anchors[anchorKey] = {
+        index: head.index,
+        time: ring.fmtDb(located.dbNow),
+        // DB 時鐘與本機的差，推算時要補回來
+        clockOffsetMs: new Date(located.dbNow).getTime() - Date.now(),
+        learnedAt: ring.fmtDb(located.dbNow),
+      };
+    }
+
     // 時間窗的起點用 DB 的時間算（head 最後寫入時間 ≈ DB 的現在）
     const windowStartMs = new Date(head.maxTime).getTime() - windowMinutes * 60000;
     const targets = tablesForWindow(ordered, windowStartMs);
 
     console.log(
       `  [${name}] head=${head.table}（${ring.fmtDb(head.maxTime)} UTC，掃描 ${scanMs}ms），` +
-        `近 ${windowMinutes} 分鐘需查 ${targets.length} 張表：${targets.map((s) => s.table).join(', ')}`
+        `近 ${windowMinutes} 分鐘需查 ${targets.length} 張表：${targets.map((s) => s.table).join(', ')}` +
+        (scanned ? '（完整掃描）' : '（用算的）')
     );
 
     // 3. 逐表撈資料
@@ -658,6 +738,7 @@ async function main() {
   const settings = mergeSettings(cfg);
   const outFile = args.out || settings.output;
   const registry = buildConnectionRegistry(cfg, settings);
+  const anchors = loadAnchors(settings.anchorCacheFile);
 
   const { sites: allSites, primaries, derived } = deriveSites(cfg, settings);
   // 沒指定 defaultPrimary 時，用推出來的第一個非 CDS 資料庫
@@ -718,7 +799,7 @@ async function main() {
   console.log(`開始平行查詢 ${sites.length} 個站台...`);
   const started = Date.now();
 
-  const settled = await Promise.allSettled(sites.map((s) => runSite(s, settings, args, registry)));
+  const settled = await Promise.allSettled(sites.map((s) => runSite(s, settings, args, registry, anchors)));
 
   const merged = [];
   const summary = [];
@@ -752,6 +833,8 @@ async function main() {
   // 預設輸出單一 JSON 陣列（與 index.js 一致），每筆自帶 _site / _sourceTable。
   // 需要各站狀態時加 --with-summary，會包成 { summary, rows }。
   const withSummary = args.withSummary || settings.includeSummary === true;
+  saveAnchors(settings.anchorCacheFile, anchors);
+
   const payload = withSummary ? { summary, rows: merged } : merged;
   const json = args.pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
   const outAbs = path.resolve(process.cwd(), outFile);

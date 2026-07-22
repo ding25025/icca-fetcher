@@ -21,3 +21,6 @@ __pycache__/
 .idea/
 Thumbs.db
 .DS_Store
+
+# 表號錨點快取（純快取，刪掉只會讓下次重新掃描）
+.ring-anchors.json

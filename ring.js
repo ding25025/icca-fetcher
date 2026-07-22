@@ -26,7 +26,8 @@
  *   "params"   列出資料表裡有哪些 parameterId / label / units 與筆數
  *
  * 用法：
- *   node ring.js                          使用 ring.config.json
+ *   node ring.js                          使用 databases.config.json（也吃 ring.config.json）
+ *   node ring.js --site cds2              多台 CDS 時指定哪一台
  *   node ring.js --config my.json         指定設定檔
  *   node ring.js --mode head              覆寫模式
  *   node ring.js --param 4102,4103        只撈這些 parameterId
@@ -42,7 +43,7 @@ const sql = require('mssql');
 // ---------- 命令列參數 ----------
 function parseArgs(argv) {
   const a = {
-    config: 'ring.config.json',
+    config: 'databases.config.json',
     out: null,
     mode: null,
     pretty: false,
@@ -74,6 +75,7 @@ function parseArgs(argv) {
     else if (t === '--by') a.by = argv[++i];
     else if (t === '--fetch') a.fetch = true;
     else if (t === '--tz-offset') a.tzOffset = Number(argv[++i]);
+    else if (t === '--site' || t === '-s') a.site = argv[++i];
     else if (t === '--help' || t === '-h') a.help = true;
   }
   return a;
@@ -86,7 +88,8 @@ function printHelp() {
   node ring.js [選項]
 
 選項：
-  -c, --config <檔案>   設定檔（預設 ring.config.json）
+  -c, --config <檔案>   設定檔（預設 databases.config.json，也吃 ring.config.json）
+  -s, --site <名稱>     多台 CDS 時指定哪一台
   -m, --mode <模式>     head | order | at | latest | byParam | params（覆寫設定檔）
   -o, --out <檔案>      輸出 JSON 檔
   -n, --limit <筆數>    覆寫 latestN
@@ -113,18 +116,72 @@ function printHelp() {
 `);
 }
 
-function loadConfig(configPath) {
+// ring 設定的預設值。吃 databases.config.json 時不必另外寫。
+const RING_DEFAULTS = {
+  tablePrefix: 'UnvalidatedDevicePeriodicData_',
+  start: 0,
+  count: 26,
+  pad: 2,
+  headColumn: 'storeTime',
+  timeColumn: 'measurementTime',
+  orderColumn: 'measurementTime',
+};
+
+function readJson(configPath) {
   const abs = path.resolve(process.cwd(), configPath);
   if (!fs.existsSync(abs)) throw new Error(`找不到設定檔：${abs}`);
-  let cfg;
   try {
-    cfg = JSON.parse(fs.readFileSync(abs, 'utf8'));
+    return JSON.parse(fs.readFileSync(abs, 'utf8'));
   } catch (e) {
-    throw new Error(`設定檔 JSON 格式錯誤：${e.message}`);
+    throw new Error(`設定檔 ${configPath} JSON 格式錯誤：${e.message}`);
   }
-  if (!cfg.connection) throw new Error('設定檔缺少 "connection"');
-  if (!cfg.ring) throw new Error('設定檔缺少 "ring"');
-  return cfg;
+}
+
+/**
+ * 兩種設定檔格式都吃：
+ *   ring.config.json        { connection: {...}, ring: {...} }        單一連線
+ *   databases.config.json   { databases: [...], vitals: { ring } }    多資料庫，自動挑 CDS
+ *
+ * 後者會挑出資料庫名稱符合 cdsDatabasePattern 的條目；有多台時用 --site 指定，
+ * 沒指定就用第一台（並印出用了哪一台，免得看錯站台的資料還不知道）。
+ */
+function resolveConfig(cfg, siteName) {
+  // --- 舊格式 ---
+  if (cfg.connection) {
+    if (!cfg.ring) throw new Error('設定檔缺少 "ring"');
+    return { connection: cfg.connection, ring: cfg.ring, source: null };
+  }
+
+  // --- databases.config.json ---
+  if (!Array.isArray(cfg.databases)) {
+    throw new Error('設定檔需要 "connection"（ring.config.json）或 "databases"（databases.config.json）');
+  }
+  const vitals = cfg.vitals || {};
+  const re = new RegExp(vitals.cdsDatabasePattern || '^CDSUnvalidatedData', 'i');
+  const cds = cfg.databases.filter(
+    (d) => d && d.name && d.connection && re.test(String(d.connection.database || ''))
+  );
+  if (!cds.length) throw new Error(`databases[] 裡沒有符合 /${re.source}/i 的 CDS 資料庫`);
+
+  let picked;
+  if (siteName) {
+    picked = cds.find((d) => String(d.name).toLowerCase() === String(siteName).toLowerCase());
+    if (!picked) {
+      throw new Error(`找不到站台 "${siteName}"。可用的有：${cds.map((d) => d.name).join(', ')}`);
+    }
+  } else {
+    picked = cds[0];
+  }
+
+  return {
+    connection: picked.connection,
+    ring: { ...RING_DEFAULTS, ...(vitals.ring || {}), ...(cfg.ring || {}) },
+    source: { name: picked.name, all: cds.map((d) => d.name) },
+  };
+}
+
+function loadConfig(configPath) {
+  return readJson(configPath);
 }
 
 // 密碼 / 帳號可寫成 "env:變數名" 從環境變數讀取
@@ -242,6 +299,7 @@ function toStat(t, row, sameCol, wantCounts) {
   return {
     index: t.index,
     table: t.table,
+    dbNow: (row && row.dbNow) || null,
     maxTime: (row && row.maxTime) || null,
     minTime: (row && row.minTime) || null,
     maxAltTime: sameCol ? null : (row && row.maxAltTime) || null,
@@ -250,6 +308,51 @@ function toStat(t, row, sameCol, wantCounts) {
     count: wantCounts ? Number(row && row.cnt) || 0 : null,
     error: null,
   };
+}
+
+// ---------- 用時間直接算出表號 ----------
+
+/**
+ * 已知某張表對應某個時刻（錨點），推算另一個時刻落在哪張表。
+ *
+ *   index = (anchorIndex + 經過幾個時段) mod count
+ *
+ * hoursPerTable 預設 1（一張表一小時）。錨點不用寫死在程式裡——
+ * 第一次完整掃描時記下 head 與當時的 DB 時間，之後就靠它推算。
+ */
+function predictIndex(anchor, targetTime, ring) {
+  if (!anchor || anchor.index == null || !anchor.time) return null;
+  const count = ring.count;
+  const perMs = (ring.hoursPerTable || 1) * 3600e3;
+  const steps = Math.floor((new Date(targetTime).getTime() - new Date(anchor.time).getTime()) / perMs);
+  return ((anchor.index + steps) % count + count) % count;
+}
+
+/** 依表號組出表名 */
+function tableNameFor(index, ring) {
+  const { tablePrefix, start = 0, pad = 2 } = ring;
+  return `${tablePrefix}${String(start + index).padStart(pad, '0')}`;
+}
+
+/** 掃描結果裡的 DB 當下時間 */
+function dbNowOf(stats) {
+  for (const s of stats) if (s.dbNow) return new Date(s.dbNow);
+  return null;
+}
+
+/**
+ * 算出來的表號到底對不對。
+ *
+ * head 是「正在被寫入」的那張表，所以它的最後寫入時間應該非常接近 DB 的現在。
+ * 差太多就代表推算錯了（公式不對、輪動速率變了、或系統停止寫入），
+ * 這時候要退回完整掃描，而不是拿著錯的表繼續撈——安靜地讀錯表最危險。
+ */
+function isPlausibleHead(stat, dbNow, ring) {
+  if (!stat || stat.error || !stat.maxTime || !dbNow) return false;
+  const perMs = (ring.hoursPerTable || 1) * 3600e3;
+  const lag = new Date(dbNow).getTime() - new Date(stat.maxTime).getTime();
+  // 落後不到一個時段就算合理（正在寫的那張表最多就差這麼多）
+  return lag >= -perMs && lag <= perMs;
 }
 
 /**
@@ -288,7 +391,7 @@ async function scanRing(pool, tables, ring) {
       .map((t) => {
         const table = safeIdent(t.table, 'table');
         return (
-          `SELECT ${Number(t.index)} AS idx, MAX([${headCol}]) AS maxTime, ` +
+          `SELECT ${Number(t.index)} AS idx, GETUTCDATE() AS dbNow, MAX([${headCol}]) AS maxTime, ` +
           `MIN([${headCol}]) AS minTime${cnt}${alt} ` +
           `FROM [${table}] WITH (NOLOCK)`
         );
@@ -313,7 +416,7 @@ async function scanRing(pool, tables, ring) {
       const r = await pool
         .request()
         .query(
-          `SELECT MAX([${headCol}]) AS maxTime, MIN([${headCol}]) AS minTime${cnt}${alt} FROM [${table}] WITH (NOLOCK)`
+          `SELECT GETUTCDATE() AS dbNow, MAX([${headCol}]) AS maxTime, MIN([${headCol}]) AS minTime${cnt}${alt} FROM [${table}] WITH (NOLOCK)`
         );
       stats.push(toStat({ ...t, table }, r.recordset[0], sameCol, wantCounts));
     } catch (e) {
@@ -623,7 +726,14 @@ async function main() {
   if (args.help) return printHelp();
 
   const cfg = loadConfig(args.config);
-  const ring = cfg.ring;
+  const resolved = resolveConfig(cfg, args.site);
+  const ring = resolved.ring;
+  if (resolved.source) {
+    console.log(
+      `使用 ${args.config} 的站台 ${resolved.source.name}` +
+        (resolved.source.all.length > 1 ? `（可用：${resolved.source.all.join(', ')}，用 --site 切換）` : '')
+    );
+  }
   const mode = args.mode || cfg.mode || 'head';
   const outFile = args.out || cfg.output || 'ring-result.json';
   const direction = cfg.direction || 'newToOld';
@@ -642,7 +752,7 @@ async function main() {
   if (args.from != null) filter.timeFrom = args.from;
   if (args.to != null) filter.timeTo = args.to;
 
-  const conn = { ...cfg.connection };
+  const conn = { ...resolved.connection };
   if (conn.password) conn.password = resolveSecret(conn.password);
   if (conn.user) conn.user = resolveSecret(conn.user);
   if (cfg.queryTimeoutMs) conn.requestTimeout = cfg.queryTimeoutMs;
@@ -863,6 +973,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  RING_DEFAULTS,
+  resolveConfig,
+  predictIndex,
+  tableNameFor,
+  dbNowOf,
+  isPlausibleHead,
+  isEmptyTable,
   buildTableNames,
   buildWhere,
   dbNow,
