@@ -209,9 +209,6 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
     "units": "mmHg",
     "measurementTime": "2026-07-22T03:24:00.000Z",
     "storeTime": "2026-07-22T03:24:05.000Z",
-    "patientIdentifier": "A12345",
-    "measurementTimeLocal": "2026-07-22 11:24:00",
-    "storeTimeLocal": "2026-07-22 11:24:05"
   }
 ]
 ```

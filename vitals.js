@@ -25,7 +25,7 @@
  *   node vitals.js --window 15           改抓近 15 分鐘
  *   node vitals.js --site cds1,cds2      只跑指定站台
  *   node vitals.js --discover            從 primary 動態查出 parameterId 清單
- *   node vitals.js --local               時間額外附上本地時區欄位
+ *   node vitals.js --utc                 時間保留 UTC（預設已 +8）
  *   node vitals.js --pretty
  */
 
@@ -47,7 +47,8 @@ function parseArgs(argv) {
     else if (t === '--param') a.param = argv[++i];
     else if (t === '--params-file' || t === '--params') a.paramsFile = argv[++i];
     else if (t === '--discover') a.discover = true;
-    else if (t === '--local') a.local = true;
+    else if (t === '--utc') a.utc = true;
+    else if (t === '--local') a.local = true; // 保留舊旗標，現在是預設行為
     else if (t === '--dry-run' || t === '-n') a.dryRun = true;
     else if (t === '--convert') a.convert = argv[++i];
     else if (t === '--with-summary') a.withSummary = true;
@@ -70,7 +71,7 @@ function printHelp() {
       --params <檔案>   讀取你自己撈出的 parameterId 清單（JSON / CSV / 純數字都吃）
       --param <ids>     直接指定 parameterId，逗號分隔
       --discover        先連 primary 查出 parameterId 清單（跑 sql/parameters.sql）
-      --local           時間欄位額外附上本地時區版本
+      --utc             時間保留 DB 原始的 UTC 值（預設已換算成本地 +8）
       --with-summary    輸出包成 { summary, rows }（預設是單純的資料陣列）
   -n, --dry-run        只檢查設定，不連資料庫（換機器時先跑這個）
       --convert <檔案>  把 parameterId 清單轉成 JSON 後結束，不連資料庫
@@ -98,7 +99,7 @@ const DEFAULTS = {
   queryTimeoutMs: 60000,
   lockTimeoutMs: 3000,
   windowMinutes: 5,
-  localTimes: false,
+  timesInUtc: false,
   displayTimezoneOffsetHours: 8,
   parameterIdsFile: 'sql/parameter-ids.txt',
   parameterSqlFile: 'sql/parameters.sql',
@@ -449,14 +450,22 @@ ORDER BY p.parameterId, p.measurementTime DESC`;
   return (r.recordset || []).map((row) => ({ _sourceTable: t, ...row }));
 }
 
-// 時間欄位附上本地時區版本（DB 存 UTC，這裡換算成執行機器的時區）
-function withLocalTimes(row, offsetHours) {
-  const conv = (v) => (v ? new Date(new Date(v).getTime() + offsetHours * 3600e3) : null);
-  return {
-    ...row,
-    measurementTimeLocal: ring.fmtDb(conv(row.measurementTime)),
-    storeTimeLocal: ring.fmtDb(conv(row.storeTime)),
-  };
+// 會被換算的時間欄位
+const TIME_FIELDS = ['measurementTime', 'storeTime'];
+
+/**
+ * ICCA 存的是 UTC，直接輸出的話台灣看起來會少 8 小時。
+ * 這裡把時間欄位就地加上時差並格式化成 "2026-07-22 11:24:00"，
+ * 讓匯出的 JSON 直接就是本地時間，不必再自己換算。
+ * 要保留原始 UTC 值就加 --utc。
+ */
+function shiftTimes(row, offsetHours) {
+  const out = { ...row };
+  for (const f of TIME_FIELDS) {
+    if (out[f] == null) continue;
+    out[f] = ring.fmtDb(new Date(new Date(out[f]).getTime() + offsetHours * 3600e3));
+  }
+  return out;
 }
 
 // ---------- 單一站台 ----------
@@ -569,7 +578,8 @@ async function runSite(site, settings, args, registry) {
         propName: props[r.parameterId] || null,
         ...r,
       };
-      return args.local || settings.localTimes ? withLocalTimes(base, offset) : base;
+      // 預設把時間換算成本地時區；--utc 則保留 DB 原始的 UTC 值
+      return args.utc || settings.timesInUtc ? base : shiftTimes(base, offset);
     });
 
     return {
@@ -747,5 +757,5 @@ module.exports = {
   mergeSettings,
   resolveConn,
   tablesForWindow,
-  withLocalTimes,
+  shiftTimes,
 };
