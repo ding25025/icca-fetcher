@@ -48,6 +48,7 @@ function parseArgs(argv) {
     else if (t === '--params-file' || t === '--params') a.paramsFile = argv[++i];
     else if (t === '--discover') a.discover = true;
     else if (t === '--utc') a.utc = true;
+    else if (t === '--all-rows') a.allRows = true;
     else if (t === '--local') a.local = true; // 保留舊旗標，現在是預設行為
     else if (t === '--dry-run' || t === '-n') a.dryRun = true;
     else if (t === '--convert') a.convert = argv[++i];
@@ -72,6 +73,7 @@ function printHelp() {
       --param <ids>     直接指定 parameterId，逗號分隔
       --discover        先連 primary 查出 parameterId 清單（跑 sql/parameters.sql）
       --utc             時間保留 DB 原始的 UTC 值（預設已換算成本地 +8）
+      --all-rows        不降頻，每筆都撈（預設每床每分鐘每參數只留最新一筆）
       --with-summary    輸出包成 { summary, rows }（預設是單純的資料陣列）
   -n, --dry-run        只檢查設定，不連資料庫（換機器時先跑這個）
       --convert <檔案>  把 parameterId 清單轉成 JSON 後結束，不連資料庫
@@ -100,6 +102,8 @@ const DEFAULTS = {
   lockTimeoutMs: 3000,
   windowMinutes: 5,
   timesInUtc: false,
+  // 每床每分鐘每個參數只留最新一筆；設 false 則原始逐筆全撈
+  perMinute: true,
   displayTimezoneOffsetHours: 8,
   parameterIdsFile: 'sql/parameter-ids.txt',
   parameterSqlFile: 'sql/parameters.sql',
@@ -408,11 +412,11 @@ async function discoverParameterIds(pool, sqlText) {
 function tablesForWindow(orderedNewToOld, windowStartMs) {
   const picked = [];
   for (const s of orderedNewToOld) {
-    if (s.error || s.count === 0 || !s.maxTime) continue;
+    if (s.error || !s.maxTime) continue;
     if (new Date(s.maxTime).getTime() < windowStartMs) break; // 再往回都更舊，不用看了
     picked.push(s);
   }
-  return picked.length ? picked : orderedNewToOld.filter((s) => !s.error && s.count > 0).slice(0, 1);
+  return picked.length ? picked : orderedNewToOld.filter((s) => !s.error && s.maxTime).slice(0, 1);
 }
 
 // ---------- 從指定的環狀表撈生命徵象 ----------
@@ -423,13 +427,21 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
   const req = pool.request().input('win', sql.Int, windowMinutes);
   parameterIds.forEach((v, i) => req.input(`p${i}`, sql.Int, v));
 
-  // 時間基準用 DB 的 GETUTCDATE()，不碰用戶端時鐘
-  const q = `
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SET DEADLOCK_PRIORITY LOW;
-SET LOCK_TIMEOUT ${Number(cfg.lockTimeoutMs) || 3000};
-SET NOCOUNT ON;
+  const COLS = 'bed, parameterId, numericValue, textValue, units, measurementTime, storeTime';
 
+  // 每床每分鐘每個參數只留最新一筆。監視器可能每幾秒送一次，降頻後資料量差很多。
+  // 在 SQL 端做掉，網路傳輸與 JSON 大小一起省；要原始逐筆就關掉 perMinute。
+  const perMinute = cfg.perMinute !== false;
+  const rank = perMinute
+    ? `,
+    ROW_NUMBER() OVER (
+      PARTITION BY d.bedId, p.parameterId,
+                   DATEADD(MINUTE, DATEDIFF(MINUTE, 0, p.measurementTime), 0)
+      ORDER BY p.measurementTime DESC, p.storeTime DESC
+    ) AS _rn`
+    : '';
+
+  const inner = `
 SELECT
     b.label            AS bed,
     p.parameterId,
@@ -437,14 +449,29 @@ SELECT
     p.textValue,
     p.units,
     p.measurementTime,
-    p.storeTime
-
+    p.storeTime${rank}
 FROM       dbo.[${t}]         p WITH (NOLOCK)
 INNER JOIN dbo.DeviceInstance d WITH (NOLOCK) ON d.deviceInstanceId = p.deviceInstanceId
 INNER JOIN dbo.UdsBed         b WITH (NOLOCK) ON b.bedId            = d.bedId
 WHERE p.measurementTime >= DATEADD(MINUTE, -@win, GETUTCDATE())
-  AND p.parameterId IN (${idParams})
+  AND p.parameterId IN (${idParams})`;
+
+  const body = perMinute
+    ? `WITH ranked AS (${inner}
+)
+SELECT ${COLS} FROM ranked WHERE _rn = 1
+ORDER BY parameterId, measurementTime DESC`
+    : `${inner}
 ORDER BY p.parameterId, p.measurementTime DESC`;
+
+  // 時間基準用 DB 的 GETUTCDATE()，不碰用戶端時鐘
+  const q = `
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET DEADLOCK_PRIORITY LOW;
+SET LOCK_TIMEOUT ${Number(cfg.lockTimeoutMs) || 3000};
+SET NOCOUNT ON;
+
+${body}`;
 
   const r = await req.query(q);
   return (r.recordset || []).map((row) => ({ _sourceTable: t, ...row }));
@@ -473,7 +500,8 @@ async function runSite(site, settings, args, registry) {
   const name = site.name;
   const windowMinutes = args.window || settings.windowMinutes || 5;
   const timeout = settings.queryTimeoutMs || 60000;
-  const ringCfg = { ...(settings.ring || {}), ...(site.ring || {}) };
+  // 排程高頻執行：關掉 COUNT(*)，掃描只留有索引的 MAX/MIN
+  const ringCfg = { withCounts: false, ...(settings.ring || {}), ...(site.ring || {}) };
 
   // parameterId 的來源，由高到低：
   //   --param 直接指定 > --params-file / 設定檔 parameterIdsFile > 站台 parameterIds > 全域 parameterIds
@@ -559,10 +587,11 @@ async function runSite(site, settings, args, registry) {
     );
 
     // 3. 逐表撈資料
+    const fetchCfg = { ...settings, perMinute: args.allRows ? false : settings.perMinute !== false };
     const tFetch = Date.now();
     let rows = [];
     for (const t of targets) {
-      const got = await fetchVitals(pool, t.table, parameterIds, windowMinutes, settings);
+      const got = await fetchVitals(pool, t.table, parameterIds, windowMinutes, fetchCfg);
       rows.push(...got);
     }
     const fetchMs = Date.now() - tFetch;

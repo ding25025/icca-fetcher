@@ -238,7 +238,7 @@ function buildWhere(ring, filter) {
 // 注意：判斷 head 一律用「未過濾」的全表時間，否則過濾後空表會誤判寫入位置
 
 // 把一列聚合結果轉成 stat 物件
-function toStat(t, row, sameCol) {
+function toStat(t, row, sameCol, wantCounts) {
   return {
     index: t.index,
     table: t.table,
@@ -246,9 +246,19 @@ function toStat(t, row, sameCol) {
     minTime: (row && row.minTime) || null,
     maxAltTime: sameCol ? null : (row && row.maxAltTime) || null,
     minAltTime: sameCol ? null : (row && row.minAltTime) || null,
-    count: Number(row && row.cnt) || 0,
+    // 沒撈筆數時是 null，不是 0——別把「不知道」跟「空的」混為一談
+    count: wantCounts ? Number(row && row.cnt) || 0 : null,
     error: null,
   };
+}
+
+/**
+ * 這張表是不是空的。
+ * headColumn 是寫入時間，不會是 NULL，所以 MAX 為 null 就等於沒有任何列。
+ * 用這個判斷而不是 count，是因為 COUNT(*) 貴而且可以省略（見 scanRing 的 withCounts）。
+ */
+function isEmptyTable(s) {
+  return !s.maxTime && !s.maxAltTime;
 }
 
 /**
@@ -266,6 +276,12 @@ async function scanRing(pool, tables, ring) {
   const sameCol = headCol === timeCol;
   const alt = sameCol ? '' : `, MAX([${timeCol}]) AS maxAltTime, MIN([${timeCol}]) AS minAltTime`;
 
+  // MAX/MIN 有索引的話是 O(1) 的索引端點查詢，但 COUNT(*) 一定要掃過整個索引。
+  // 定位 head 根本用不到筆數（MAX 是 null 就代表空表），所以排程高頻執行時
+  // 可以關掉，只在互動查看時才需要。
+  const wantCounts = ring.withCounts !== false;
+  const cnt = wantCounts ? ', COUNT(*) AS cnt' : '';
+
   // --- 快路徑：一次查完 ---
   try {
     const union = tables
@@ -273,7 +289,7 @@ async function scanRing(pool, tables, ring) {
         const table = safeIdent(t.table, 'table');
         return (
           `SELECT ${Number(t.index)} AS idx, MAX([${headCol}]) AS maxTime, ` +
-          `MIN([${headCol}]) AS minTime, COUNT(*) AS cnt${alt} ` +
+          `MIN([${headCol}]) AS minTime${cnt}${alt} ` +
           `FROM [${table}] WITH (NOLOCK)`
         );
       })
@@ -282,7 +298,7 @@ async function scanRing(pool, tables, ring) {
     const r = await pool.request().query(union);
     const byIdx = new Map((r.recordset || []).map((row) => [Number(row.idx), row]));
     if (byIdx.size === tables.length) {
-      return tables.map((t) => toStat({ ...t, table: safeIdent(t.table, 'table') }, byIdx.get(t.index), sameCol));
+      return tables.map((t) => toStat({ ...t, table: safeIdent(t.table, 'table') }, byIdx.get(t.index), sameCol, wantCounts));
     }
     // 回來的列數對不上就不要猜，走慢路徑重來
   } catch (_) {
@@ -297,9 +313,9 @@ async function scanRing(pool, tables, ring) {
       const r = await pool
         .request()
         .query(
-          `SELECT MAX([${headCol}]) AS maxTime, MIN([${headCol}]) AS minTime, COUNT(*) AS cnt${alt} FROM [${table}] WITH (NOLOCK)`
+          `SELECT MAX([${headCol}]) AS maxTime, MIN([${headCol}]) AS minTime${cnt}${alt} FROM [${table}] WITH (NOLOCK)`
         );
-      stats.push(toStat({ ...t, table }, r.recordset[0], sameCol));
+      stats.push(toStat({ ...t, table }, r.recordset[0], sameCol, wantCounts));
     } catch (e) {
       stats.push({
         index: t.index,
@@ -423,7 +439,7 @@ function estimateRotation(orderedNewToOld, axis = 'store') {
  * 直接比對各表的 [min, max] 實際區間，不靠「一張表一小時」的假設。
  */
 function locateByTime(stats, targetMs, axis = 'store') {
-  const usable = stats.filter((s) => !s.error && s.count > 0 && rangeOf(s, axis).min && rangeOf(s, axis).max);
+  const usable = stats.filter((s) => !s.error && rangeOf(s, axis).min && rangeOf(s, axis).max);
   if (!usable.length) return { status: 'noData', table: null };
 
   let oldest = Infinity;
@@ -502,7 +518,7 @@ async function fetchLatest(pool, orderedNewToOld, ring, latestN, filter) {
 
   for (const s of orderedNewToOld) {
     if (rows.length >= latestN) break;
-    if (s.count === 0 || s.error) continue;
+    if (isEmptyTable(s) || s.error) continue;
     const remaining = latestN - rows.length;
     const table = safeIdent(s.table, 'table');
 
@@ -563,7 +579,7 @@ async function fetchParamCatalog(pool, targets, ring, filter) {
   const acc = new Map();
 
   for (const s of targets) {
-    if (s.count === 0 || s.error) continue;
+    if (isEmptyTable(s) || s.error) continue;
     const table = safeIdent(s.table, 'table');
     const req = pool.request();
     where.apply(req);
