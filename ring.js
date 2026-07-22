@@ -735,7 +735,9 @@ async function main() {
     );
   }
   const mode = args.mode || cfg.mode || 'head';
-  const outFile = args.out || cfg.output || 'ring-result.json';
+  // databases.config.json 的 output 是 index.js 的輸出檔，ring.js 不能沿用，
+  // 否則跑一次就把 icca-data.json 蓋掉了
+  const outFile = args.out || (resolved.source ? 'ring-result.json' : cfg.output) || 'ring-result.json';
   const direction = cfg.direction || 'newToOld';
   const latestN = args.limit || cfg.latestN || 100;
   // DB 時鐘比本機快幾小時。null = 自動偵測
