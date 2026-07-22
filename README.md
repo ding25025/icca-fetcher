@@ -228,7 +228,15 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 
 ```bash
 npm install
+cp databases.config.example.json databases.config.json   # 再填入實際連線資訊
 ```
+
+> **`databases.config.json` 已列入 `.gitignore`，不會被提交。** 它含明文密碼與內網位址，
+> 請不要移出忽略清單。密碼建議寫成 `"env:ICCA_PASSWORD"`，程式會改讀環境變數：
+>
+> ```bash
+> ICCA_PASSWORD='...' node vitals.js --pretty
+> ```
 
 會安裝 [`mssql`](https://www.npmjs.com/package/mssql) 套件（底層走 tedious 驅動，純 Node.js，不需另外裝 ODBC）。
 
