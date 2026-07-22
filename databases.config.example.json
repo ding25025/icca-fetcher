@@ -1,0 +1,41 @@
+{
+  "_comment": "把這個檔複製成 databases.config.json 再填入實際連線資訊。databases.config.json 已列入 .gitignore，不會被提交。密碼建議寫成 \"env:變數名\"，程式會改讀環境變數。",
+
+  "output": "icca-data.json",
+  "queryTimeoutMs": 60000,
+
+  "databases": [
+    {
+      "name": "db1",
+      "enabled": true,
+      "connection": {
+        "server": "10.0.0.1",
+        "port": 1433,
+        "database": "ICCA_DB01",
+        "user": "sa",
+        "password": "env:ICCA_PASSWORD",
+        "options": { "encrypt": false, "trustServerCertificate": true }
+      },
+      "query": "SELECT TOP 10 * FROM sys.tables"
+    },
+    {
+      "name": "cds1",
+      "enabled": true,
+      "connection": {
+        "server": "10.0.0.11",
+        "port": 1433,
+        "database": "CDSUnvalidatedDataDB",
+        "user": "sa",
+        "password": "env:ICCA_PASSWORD",
+        "options": { "encrypt": false, "trustServerCertificate": true }
+      },
+      "query": "SELECT TOP 10 parameterId, label, numericValue, measurementTime FROM dbo.UnvalidatedDevicePeriodicData_00 WITH (NOLOCK)"
+    }
+  ],
+
+  "_comment_vitals": "vitals.js 專用設定，全部可省略（見 vitals.js 的 DEFAULTS）。index.js 不會讀這一段。站台由 databases[] 自動辨識：database 名稱符合 ^CDSUnvalidatedData 的當成 CDS，其餘當成 primary。",
+  "vitals": {
+    "windowMinutes": 5,
+    "parameterIdsFile": "sql/parameter-ids.txt"
+  }
+}

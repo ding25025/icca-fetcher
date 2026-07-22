@@ -1,0 +1,20 @@
+{
+  "name": "icca-fetcher",
+  "version": "1.0.0",
+  "description": "同時查詢多個 SQL Server 資料庫、撈取 ICCA 資料並合併輸出成單一 JSON 陣列",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "start:config": "node index.js --config",
+    "vitals": "node vitals.js --pretty",
+    "ring": "node ring.js --mode head --pretty"
+  },
+  "dependencies": {
+    "mssql": "^11.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

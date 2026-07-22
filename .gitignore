@@ -1,0 +1,23 @@
+# ---- 機敏設定：含明文密碼與內網位址，絕對不要進版控 ----
+databases.config.json
+ring.config.json
+ring_config.json
+*.local.json
+.env
+
+# ---- 執行結果 ----
+icca-data.json
+icca-vitals.json
+icca-ring-latest.json
+ring-result.json
+
+# ---- 相依套件 ----
+node_modules/
+__pycache__/
+*.pyc
+
+# ---- 編輯器 / 系統 ----
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
