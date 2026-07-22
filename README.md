@@ -1,3 +1,116 @@
+# 快速開始
+
+在**連得到 ICCA 資料庫的那台機器**上執行。
+
+### 1. 裝 Node.js
+
+需要 **Node.js 18 以上**。到 <https://nodejs.org> 下載 LTS 版安裝，然後確認：
+
+```bash
+node -v
+```
+
+### 2. 取得程式
+
+```bash
+git clone https://github.com/ding25025/icca-fetcher.git
+cd icca-fetcher
+npm install
+```
+
+### 3. 建立設定檔
+
+`databases.config.json` 含帳密，**不在 repo 裡**，要自己建立：
+
+```bash
+cp databases.config.example.json databases.config.json
+```
+
+然後編輯它，把每個 `connection` 填成實際的值：
+
+```json
+{
+  "name": "cds1",
+  "connection": {
+    "server": "172.30.24.134",          // ← 用 IP 或確定解得開的主機名稱
+    "port": 1433,
+    "database": "CDSUnvalidatedDataDB",
+    "user": "sa",
+    "password": "env:ICCA_PASSWORD",     // ← 見下方
+    "options": { "encrypt": false, "trustServerCertificate": true }
+  },
+  "query": "SELECT 1"
+}
+```
+
+- **`server` 請優先填 IP。** 主機名稱（如 `ICCA_CDS02`）在某些網段解析不到，會連線逾時。
+- **`query` 欄位是 `index.js` 用的**，`vitals.js` 不看它，但保留著比較不會出錯。
+- 有幾台 CDS 就放幾個條目，`vitals.js` 會自動認出來（資料庫名稱是 `CDSUnvalidatedData*` 的就是）。
+
+密碼建議用環境變數，不要寫死在檔案裡：
+
+```bash
+# Windows PowerShell
+$env:ICCA_PASSWORD = '你的密碼'
+
+# Windows cmd
+set ICCA_PASSWORD=你的密碼
+
+# Linux / macOS
+export ICCA_PASSWORD='你的密碼'
+```
+
+### 4. 先試跑，不連資料庫
+
+```bash
+node vitals.js --dry-run
+```
+
+會印出認到幾台 CDS、要撈哪些 parameterId、時間窗多長、輸出到哪裡。有錯（設定檔格式、
+找不到清單檔、環境變數沒設）這一步就會講。
+
+### 5. 實際執行
+
+```bash
+node vitals.js --pretty
+```
+
+成功的話會看到：
+
+```
+從 databases.config.json 認出 7 個 CDS：cds1, ..., cds7　primary：db1
+開始平行查詢 7 個站台...
+  [cds1] parameterId：48 個（來源：sql/parameter-ids.txt）
+  [cds1] head=UnvalidatedDevicePeriodicData_19（2026-07-22 03:24:00 UTC），近 5 分鐘需查 1 張表
+  ✓ cds1：284 筆
+  ...
+合併總筆數：1820
+已輸出：C:\...\icca-vitals.json
+```
+
+### 常用變化
+
+```bash
+node vitals.js --site cds1 --pretty     # 只跑一站，第一次建議這樣測
+node vitals.js -w 30                    # 撈近 30 分鐘（預設 5）
+node vitals.js --local --pretty         # 時間多附一份台灣時區
+node vitals.js -o today.json            # 換輸出檔名
+node vitals.js --help                   # 全部選項
+```
+
+### 連不上時
+
+| 症狀 | 原因 |
+|---|---|
+| `Failed to connect ... ETIMEDOUT` | `server` 填的主機名稱解析不到 → 改用 IP |
+| `Login failed for user` | 帳密錯，或 `ICCA_PASSWORD` 環境變數沒設 |
+| `環境變數 ICCA_PASSWORD 未設定` | 同上，設好再跑 |
+| 連得到但 0 筆 | 那段時間沒資料，用 `-w 60` 拉長時間窗試試 |
+
+單站失敗不會影響其它站，錯誤訊息會標出是哪一站。
+
+---
+
 # 生命徵象抓取工具（vitals.js）
 
 **多站台 + 環狀表定位**，是 `index.js` 與 `ring.js` 的組合應用，也是實務上主要要用的那支。
