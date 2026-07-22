@@ -545,6 +545,28 @@ ${body}`;
   return (r.recordset || []).map((row) => ({ _sourceTable: t, ...row }));
 }
 
+/**
+ * 跨表去重。
+ *
+ * 環狀表在交界處會重疊 30~40 秒（前一張還在收尾、下一張已經開始寫），
+ * 所以時間窗跨表時同一床同一參數同一分鐘會在兩張表各出現一次。
+ * SQL 的降頻是各表獨立做的，管不到這件事，只能在合併後補一次。
+ */
+function dedupePerMinute(rows) {
+  const kept = new Map();
+  for (const r of rows) {
+    if (!r.measurementTime) continue;
+    const t = new Date(r.measurementTime);
+    const minute = Math.floor(t.getTime() / 60000);
+    const key = `${r.bed}|${r.parameterId}|${minute}`;
+    const prev = kept.get(key);
+    if (!prev || t > new Date(prev.measurementTime)) kept.set(key, r);
+  }
+  // 沒有 measurementTime 的資料（理論上不該有）原樣保留，不要默默吃掉
+  const orphans = rows.filter((r) => !r.measurementTime);
+  return [...kept.values(), ...orphans];
+}
+
 // 會被換算的時間欄位
 const TIME_FIELDS = ['measurementTime', 'storeTime'];
 
@@ -675,6 +697,15 @@ async function runSite(site, settings, args, registry, anchors) {
       rows.push(...got);
     }
     const fetchMs = Date.now() - tFetch;
+
+    // 跨表時交界重疊會產生重複，合併後補一次去重
+    const beforeDedupe = rows.length;
+    if (fetchCfg.perMinute && targets.length > 1) {
+      rows = dedupePerMinute(rows);
+      if (rows.length !== beforeDedupe) {
+        console.log(`  [${name}] 跨表去重：${beforeDedupe} → ${rows.length} 筆`);
+      }
+    }
 
     // 補上站台標記與（可選的）本地時間
     const offset = settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8;
@@ -869,5 +900,6 @@ module.exports = {
   mergeSettings,
   resolveConn,
   tablesForWindow,
+  dedupePerMinute,
   shiftTimes,
 };
