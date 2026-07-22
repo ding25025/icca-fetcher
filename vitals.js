@@ -533,7 +533,9 @@ async function runSite(site, settings, args, registry) {
   const pool = await connect(cdsConn, timeout);
   try {
     const tables = ring.buildTableNames(ringCfg);
+    const tScan = Date.now();
     const stats = await ring.scanRing(pool, tables, ringCfg);
+    const scanMs = Date.now() - tScan;
     const head = ring.findHead(stats);
     if (!head) throw new Error('所有環狀表都沒有資料，無法判斷寫入頭');
 
@@ -543,16 +545,18 @@ async function runSite(site, settings, args, registry) {
     const targets = tablesForWindow(ordered, windowStartMs);
 
     console.log(
-      `  [${name}] head=${head.table}（${ring.fmtDb(head.maxTime)} UTC），` +
+      `  [${name}] head=${head.table}（${ring.fmtDb(head.maxTime)} UTC，掃描 ${scanMs}ms），` +
         `近 ${windowMinutes} 分鐘需查 ${targets.length} 張表：${targets.map((s) => s.table).join(', ')}`
     );
 
     // 3. 逐表撈資料
+    const tFetch = Date.now();
     let rows = [];
     for (const t of targets) {
       const got = await fetchVitals(pool, t.table, parameterIds, windowMinutes, settings);
       rows.push(...got);
     }
+    const fetchMs = Date.now() - tFetch;
 
     // 補上站台標記與（可選的）本地時間
     const offset = settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8;
@@ -576,6 +580,8 @@ async function runSite(site, settings, args, registry) {
       dbTimeUtc: ring.fmtDb(head.maxTime),
       parameterCount: parameterIds.length,
       count: rows.length,
+      scanMs,
+      fetchMs,
       rows,
     };
   } finally {
@@ -690,8 +696,12 @@ async function main() {
         tablesQueried: s.value.tablesQueried,
         dbTimeUtc: s.value.dbTimeUtc,
         count: s.value.count,
+        scanMs: s.value.scanMs,
+        fetchMs: s.value.fetchMs,
       });
-      console.log(`  ✓ ${name}：${s.value.count} 筆（${s.value.headTable}）`);
+      console.log(
+        `  ✓ ${name}：${s.value.count} 筆（${s.value.headTable}，掃描 ${s.value.scanMs}ms + 撈取 ${s.value.fetchMs}ms）`
+      );
     } else {
       failures++;
       const msg = s.reason && s.reason.message ? s.reason.message : String(s.reason);

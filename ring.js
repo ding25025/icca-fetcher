@@ -236,16 +236,60 @@ function buildWhere(ring, filter) {
 
 // ---------- 掃描所有表的 MAX(時間) 與 COUNT ----------
 // 注意：判斷 head 一律用「未過濾」的全表時間，否則過濾後空表會誤判寫入位置
+
+// 把一列聚合結果轉成 stat 物件
+function toStat(t, row, sameCol) {
+  return {
+    index: t.index,
+    table: t.table,
+    maxTime: (row && row.maxTime) || null,
+    minTime: (row && row.minTime) || null,
+    maxAltTime: sameCol ? null : (row && row.maxAltTime) || null,
+    minAltTime: sameCol ? null : (row && row.minAltTime) || null,
+    count: Number(row && row.cnt) || 0,
+    error: null,
+  };
+}
+
+/**
+ * 掃描 26 張表。
+ *
+ * 逐表各下一次查詢要走 26 次網路往返，遠端資料庫上光這段就要好幾秒。
+ * 所以先試著用 UNION ALL 把 26 個聚合併成單一查詢，只走一次往返；
+ * 失敗時（某張表不存在、權限不足…）才退回逐表模式，那樣才指得出是哪一張出問題。
+ */
 async function scanRing(pool, tables, ring) {
   // headColumn 決定「這張表最後被寫入的時間」，用來定位寫入頭
   const headCol = safeIdent(headColumnOf(ring), 'headColumn');
   // timeColumn 是臨床量測時間，兩者不同時一起撈回來，方便交叉比對
   const timeCol = safeIdent(ring.timeColumn, 'timeColumn');
-  const alt =
-    headCol !== timeCol
-      ? `, MAX([${timeCol}]) AS maxAltTime, MIN([${timeCol}]) AS minAltTime`
-      : '';
+  const sameCol = headCol === timeCol;
+  const alt = sameCol ? '' : `, MAX([${timeCol}]) AS maxAltTime, MIN([${timeCol}]) AS minAltTime`;
 
+  // --- 快路徑：一次查完 ---
+  try {
+    const union = tables
+      .map((t) => {
+        const table = safeIdent(t.table, 'table');
+        return (
+          `SELECT ${Number(t.index)} AS idx, MAX([${headCol}]) AS maxTime, ` +
+          `MIN([${headCol}]) AS minTime, COUNT(*) AS cnt${alt} ` +
+          `FROM [${table}] WITH (NOLOCK)`
+        );
+      })
+      .join('\nUNION ALL\n');
+
+    const r = await pool.request().query(union);
+    const byIdx = new Map((r.recordset || []).map((row) => [Number(row.idx), row]));
+    if (byIdx.size === tables.length) {
+      return tables.map((t) => toStat({ ...t, table: safeIdent(t.table, 'table') }, byIdx.get(t.index), sameCol));
+    }
+    // 回來的列數對不上就不要猜，走慢路徑重來
+  } catch (_) {
+    // 單一查詢失敗 → 用逐表模式找出是哪一張表的問題
+  }
+
+  // --- 慢路徑：逐表查，可標出個別失敗的表 ---
   const stats = [];
   for (const t of tables) {
     const table = safeIdent(t.table, 'table');
@@ -253,19 +297,9 @@ async function scanRing(pool, tables, ring) {
       const r = await pool
         .request()
         .query(
-          `SELECT MAX([${headCol}]) AS maxTime, MIN([${headCol}]) AS minTime, COUNT(*) AS cnt${alt} FROM [${table}]`
+          `SELECT MAX([${headCol}]) AS maxTime, MIN([${headCol}]) AS minTime, COUNT(*) AS cnt${alt} FROM [${table}] WITH (NOLOCK)`
         );
-      const row = r.recordset[0] || {};
-      stats.push({
-        index: t.index,
-        table,
-        maxTime: row.maxTime || null,
-        minTime: row.minTime || null,
-        maxAltTime: alt ? row.maxAltTime || null : null,
-        minAltTime: alt ? row.minAltTime || null : null,
-        count: Number(row.cnt) || 0,
-        error: null,
-      });
+      stats.push(toStat({ ...t, table }, r.recordset[0], sameCol));
     } catch (e) {
       stats.push({
         index: t.index,
