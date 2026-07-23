@@ -93,7 +93,7 @@ node vitals.js --pretty
 ```bash
 node vitals.js --site cds1 --pretty     # 只跑一站，第一次建議這樣測
 node vitals.js -w 30                    # 撈近 30 分鐘（預設 5）
-node vitals.js --local --pretty         # 時間多附一份台灣時區
+node vitals.js --utc --pretty           # 時間保留 DB 原始的 UTC（預設已 +8）
 node vitals.js -o today.json            # 換輸出檔名
 node vitals.js --help                   # 全部選項
 ```
@@ -391,10 +391,10 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 撈回來的每筆資料會多兩個欄位：
 
 ```json
-{ "parameterId": 150034, "_paramLabel": "ABP", "_paramProp": "diastolic", ... }
+{ "parameterId": 150034, "terseLabel": "ABP", "propName": "diastolic", ... }
 ```
 
-`_paramProp` 很重要——`ABP` 底下有 systolic / diastolic / mean 三種，只看 `_paramLabel`
+`propName` 很重要——`ABP` 底下有 systolic / diastolic / mean 三種，只看 `terseLabel`
 分不出來。
 
 > 同一個 id 掛在多個細項下時（例如 `-268367660` 同時是 ABP diastolic 與 systolic），
@@ -430,8 +430,9 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 台灣看到的「差 8 小時」就是這麼來的。
 
 `vitals.js` 的時間窗直接用 **DB 端的 `GETUTCDATE()`** 計算，完全不碰用戶端時鐘，所以不管執行
-機器在哪個時區都不會算錯。輸出的時間欄位維持 DB 原值（UTC）；加 `--local` 會另外補上
-`measurementTimeLocal` / `storeTimeLocal`（預設 +8，可用 `displayTimezoneOffsetHours` 調整）。
+機器在哪個時區都不會算錯。輸出的 `measurementTime` / `storeTime` 已經換算成本地時間
+（`2026-07-22 11:24:00`，預設 +8，可用 `displayTimezoneOffsetHours` 調整）；
+要保留 DB 原始的 UTC 值就加 `--utc`。
 
 ---
 

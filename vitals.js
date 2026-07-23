@@ -41,7 +41,7 @@ const ring = require('./ring.js');
 
 // ---------- 命令列參數 ----------
 function parseArgs(argv) {
-  const a = { config: 'databases.config.json', out: null, pretty: false, window: null, site: null, discover: false, local: false, param: null, paramsFile: null };
+  const a = { config: 'databases.config.json', out: null, pretty: false, window: null, site: null, discover: false, param: null, paramsFile: null };
   for (let i = 2; i < argv.length; i++) {
     const t = argv[i];
     if (t === '--config' || t === '-c') a.config = argv[++i];
@@ -58,7 +58,6 @@ function parseArgs(argv) {
     else if (t === '--discover') a.discover = true;
     else if (t === '--utc') a.utc = true;
     else if (t === '--all-rows') a.allRows = true;
-    else if (t === '--local') a.local = true; // 保留舊旗標，現在是預設行為
     else if (t === '--dry-run' || t === '-n') a.dryRun = true;
     else if (t === '--convert') a.convert = argv[++i];
     else if (t === '--with-summary') a.withSummary = true;
@@ -142,6 +141,9 @@ const DEFAULTS = {
   defaultPrimary: null,
   // CDS 資料庫的判斷方式（用來從 databases[] 裡自動分辨 cds 與 primary）
   cdsDatabasePattern: '^CDSUnvalidatedData',
+  // 只放定位 head 用得到的：表名怎麼組（tablePrefix/start/count/pad）、
+  // 哪一欄代表最後寫入（headColumn）、哪一欄是量測時間（timeColumn）。
+  // 撈資料的排序寫死在 fetchVitals 裡，不必再開一個 orderColumn。
   ring: {
     tablePrefix: 'UnvalidatedDevicePeriodicData_',
     start: 0,
@@ -149,7 +151,6 @@ const DEFAULTS = {
     pad: 2,
     headColumn: 'storeTime',
     timeColumn: 'measurementTime',
-    orderColumn: 'measurementTime',
   },
 };
 
@@ -265,7 +266,7 @@ function collect(out, id, label, prop) {
  *   terseLabel<TAB>propName<TAB>cdsParameterId           SSMS「連同標頭複製」
  *   ABP | diastolic | 150034                             管線分隔，沒有標頭
  *   147842,150456,-268367660                             純數字，逗號或換行分隔
- * terseLabel / propName 有出現時會一起收下來，之後放進每筆資料的 _paramLabel / _paramProp。
+ * terseLabel / propName 有出現時會一起收下來，之後原名放進每筆資料裡。
  */
 function parseParameterList(text) {
   const s = String(text).replace(/^﻿/, '').trim();
@@ -375,32 +376,11 @@ function loadParameterFile(file) {
 
 /**
  * 連線資訊只有一份，就是 databases.config.json 的 databases[]，
- * 這裡用 name 索引起來。IP 與密碼都不必再抄一次。
- *
- * 名字來源（後者覆蓋前者）：
- *   1. cfg.databases[].name
- *   2. cfg.connectionsFrom 指向的另一個檔案（設定檔拆開放時才需要）
- *   3. cfg.vitals.connections（要臨時覆寫某個名字時用）
+ * 這裡用 name 索引起來，站台才能用名字互相引用。IP 與密碼都不必再抄一次。
  */
-function buildConnectionRegistry(cfg, settings = {}) {
+function buildConnectionRegistry(cfg) {
   const reg = new Map();
-  const add = (list) => {
-    for (const d of list || []) if (d && d.name && d.connection) reg.set(d.name, d.connection);
-  };
-
-  add(cfg.databases);
-
-  if (cfg.connectionsFrom) {
-    const abs = path.resolve(process.cwd(), cfg.connectionsFrom);
-    if (!fs.existsSync(abs)) throw new Error(`找不到連線設定檔：${abs}`);
-    try {
-      add(JSON.parse(fs.readFileSync(abs, 'utf8')).databases);
-    } catch (e) {
-      throw new Error(`連線設定檔 ${cfg.connectionsFrom} JSON 格式錯誤：${e.message}`);
-    }
-  }
-
-  for (const [name, conn] of Object.entries(settings.connections || {})) reg.set(name, conn);
+  for (const d of cfg.databases || []) if (d && d.name && d.connection) reg.set(d.name, d.connection);
   return reg;
 }
 
@@ -462,14 +442,13 @@ function databaseFromSql(sqlText) {
 }
 
 /**
- * 回傳 Map<bedId, { lifetimeNumber, encounterNumber, ptEncounterId }>。
+ * 把查回來的列變成 Map<bedId, { lifetimeNumber, encounterNumber, ptEncounterId }>。
  * bedId 兩邊同一組值（primary 的 PtLocationStay.bedId、CDS 的 UdsBed.bedId），
  * 是唯一能把儀器資料接到病人身上的鑰匙。
  */
-async function fetchPatients(pool, sqlText) {
-  const r = await pool.request().query(stripBatchDirectives(sqlText));
+function indexPatientsByBed(rows) {
   const byBed = new Map();
-  for (const row of r.recordset || []) {
+  for (const row of rows || []) {
     if (row.bedId == null) continue;
     const key = String(row.bedId).trim();
     // 同一張床理論上只會有一位線上病人。真的重複時不要讓沒有病歷號的那筆蓋掉有的，
@@ -483,6 +462,12 @@ async function fetchPatients(pool, sqlText) {
     });
   }
   return byBed;
+}
+
+/** 給測試與外部呼叫用：連線跑一次 SQL 再索引起來 */
+async function fetchPatients(pool, sqlText) {
+  const r = await pool.request().query(stripBatchDirectives(sqlText));
+  return indexPatientsByBed(r.recordset || []);
 }
 
 /**
@@ -504,63 +489,88 @@ function patientDatabaseCandidates(sqlText, primary, site, settings, cliDb) {
 }
 
 /**
+ * 病人查詢要用的東西：SQL 內容、primary 連線、候選資料庫。
+ * 正常執行（loadPatients）與診斷（--check-patients）共用同一份判斷，兩邊才不會走鐘。
+ * 缺東西時回傳 { error }，由呼叫端決定是要警告後略過，還是直接中止。
+ */
+function resolvePatientQuery(site, settings, args, registry, siteName) {
+  const sqlFile = args.patientSqlFile || site.patientSqlFile || settings.patientSqlFile;
+  if (!sqlFile) return { error: '沒有設定 patientSqlFile' };
+  const abs = path.resolve(process.cwd(), sqlFile);
+  if (!fs.existsSync(abs)) return { error: `找不到病人 SQL ${abs}` };
+
+  const primaryRef = site.primary || settings.defaultPrimary;
+  if (!primaryRef) return { error: '沒有可用的 primary（站台 primary 或 defaultPrimary）' };
+  const primary = resolveConn(primaryRef, registry, 'primary', siteName);
+  const sqlText = fs.readFileSync(abs, 'utf8');
+
+  return {
+    sqlFile,
+    sqlText,
+    primary,
+    key: typeof primaryRef === 'string' ? primaryRef : `${primary.server}/${primary.database}`,
+    candidates: patientDatabaseCandidates(sqlText, primary, site, settings, args.patientDb),
+  };
+}
+
+/**
+ * 依序試候選資料庫，第一個查成功的就回傳。
+ * 會有這個迴圈是因為連錯資料庫（找不到 dbo.PtLocationStay）是最常見的失敗，
+ * 換下一個候選再試就好。回傳 { database, rows, errors }，database 是 null 代表全滅。
+ */
+async function runPatientSql(primary, candidates, sqlText, timeout) {
+  const errors = [];
+  for (const database of candidates) {
+    let pool;
+    try {
+      pool = await connect({ ...primary, database }, timeout);
+      const r = await pool.request().query(stripBatchDirectives(sqlText));
+      return { database, rows: r.recordset || [], errors };
+    } catch (e) {
+      errors.push({ database, message: e.message });
+    } finally {
+      if (pool) { try { await pool.close(); } catch (_) {} }
+    }
+  }
+  return { database: null, rows: null, errors };
+}
+
+/**
  * 查病人是「有就加分」的事：primary 連不上、SQL 檔不見、查詢失敗，都只警告，
  * 儀器資料照樣輸出，病人欄位留 null。不要讓 primary 拖垮整個排程。
  * 多個 CDS 共用同一台 primary 時只查一次（primaryCache）。
  */
-async function loadPatients(site, settings, registry, siteName, timeout, sqlFileOverride, cliDb) {
-  const sqlFile = sqlFileOverride || site.patientSqlFile || settings.patientSqlFile;
-  if (!sqlFile) return null;
-  const abs = path.resolve(process.cwd(), sqlFile);
-  if (!fs.existsSync(abs)) {
-    console.warn(`  [${siteName}] 找不到病人 SQL ${abs}，這次不帶病歷號`);
+async function loadPatients(site, settings, args, registry, siteName, timeout) {
+  const q = resolvePatientQuery(site, settings, args, registry, siteName);
+  if (q.error) {
+    console.warn(`  [${siteName}] ${q.error}，這次不帶病歷號`);
     return null;
   }
-
-  const primaryRef = site.primary || settings.defaultPrimary;
-  if (!primaryRef) {
-    console.warn(`  [${siteName}] 沒有可用的 primary（站台 primary 或 defaultPrimary），這次不帶病歷號`);
-    return null;
-  }
-  const primary = resolveConn(primaryRef, registry, 'primary', siteName);
-  const key = typeof primaryRef === 'string' ? primaryRef : `${primary.server}/${primary.database}`;
-  const sqlText = fs.readFileSync(abs, 'utf8');
-
-  const candidates = patientDatabaseCandidates(sqlText, primary, site, settings, cliDb);
 
   // 失敗在快取的函式裡面就吃掉，讓它一律 resolve；否則被共用的 promise 一旦 reject，
   // 還沒接上 handler 的站台會冒出 unhandled rejection。
-  return discoverOnce(`patients:${key}:${candidates.join('|')}`, async () => {
-    const errors = [];
-    for (const database of candidates) {
-      let pool;
-      try {
-        pool = await connect({ ...primary, database }, timeout);
-        const byBed = await fetchPatients(pool, sqlText);
-        const noMrn = [...byBed.values()].filter((p) => p.lifetimeNumber == null).length;
-        console.log(
-          `  [primary ${key}→${database}] 線上病人：${byBed.size} 床` +
-            (noMrn ? `（其中 ${noMrn} 床沒有病歷號）` : '') +
-            `（${sqlFile}）`
-        );
-        if (!byBed.size) {
-          console.warn(`  ⚠ ${database} 查得到但沒有任何在床病人，病歷號會是 null。用 --check-patients 看細節`);
-        }
-        return byBed;
-      } catch (e) {
-        // 常見狀況：這個資料庫不是病人資料所在的那個（找不到 dbo.PtLocationStay），
-        // 就換下一個候選再試，全部失敗才放棄。
-        errors.push(`${database}：${e.message}`);
-      } finally {
-        if (pool) { try { await pool.close(); } catch (_) {} }
-      }
+  return discoverOnce(`patients:${q.key}:${q.candidates.join('|')}`, async () => {
+    const { database, rows, errors } = await runPatientSql(q.primary, q.candidates, q.sqlText, timeout);
+    if (!database) {
+      console.warn(
+        `  ⚠ [primary ${q.key}] 查病人資料失敗，病歷號會是 null（儀器資料照常輸出）\n` +
+          errors.map((e) => `      ${e.database}：${e.message}`).join('\n') +
+          `\n      診斷：node vitals.js --check-patients`
+      );
+      return null;
     }
-    console.warn(
-      `  ⚠ [primary ${key}] 查病人資料失敗，病歷號會是 null（儀器資料照常輸出）\n` +
-        errors.map((m) => `      ${m}`).join('\n') +
-        `\n      診斷：node vitals.js --check-patients`
+
+    const byBed = indexPatientsByBed(rows);
+    const noMrn = [...byBed.values()].filter((p) => p.lifetimeNumber == null).length;
+    console.log(
+      `  [primary ${q.key}→${database}] 線上病人：${byBed.size} 床` +
+        (noMrn ? `（其中 ${noMrn} 床沒有病歷號）` : '') +
+        `（${q.sqlFile}）`
     );
-    return null;
+    if (!byBed.size) {
+      console.warn(`  ⚠ ${database} 查得到但沒有任何在床病人，病歷號會是 null。用 --check-patients 看細節`);
+    }
+    return byBed;
   });
 }
 
@@ -574,51 +584,31 @@ async function loadPatients(site, settings, registry, siteName, timeout, sqlFile
  */
 async function checkPatients(sites, settings, args, registry) {
   const timeout = settings.queryTimeoutMs || 60000;
-  const sqlFile = args.patientSqlFile || settings.patientSqlFile;
   console.log(`\n[病人資料自我檢查]\n`);
 
   // --- 1. primary ---
-  const primaryRef = settings.defaultPrimary;
-  if (!primaryRef) return console.error('✗ 沒有可用的 primary（vitals.defaultPrimary 或 databases[] 裡的非 CDS 資料庫）');
-  if (!sqlFile) return console.error('✗ 沒有設定 patientSqlFile');
-  const abs = path.resolve(process.cwd(), sqlFile);
-  if (!fs.existsSync(abs)) return console.error(`✗ 找不到 ${abs}`);
-  const sqlText = fs.readFileSync(abs, 'utf8');
-  const primary = resolveConn(primaryRef, registry, 'primary', 'primary');
-  const candidates = patientDatabaseCandidates(sqlText, primary, {}, settings, args.patientDb);
+  const q = resolvePatientQuery({}, settings, args, registry, 'primary');
+  if (q.error) return console.error(`✗ ${q.error}`);
 
-  console.log(`1. primary：${primaryRef} → ${primary.server}:${primary.port || 1433}`);
-  console.log(`   SQL：${sqlFile}`);
-  console.log(`   候選資料庫：${candidates.join(' → ')}` + (databaseFromSql(sqlText) ? `（第一個來自 SQL 裡的 USE）` : ''));
+  console.log(`1. primary：${q.key} → ${q.primary.server}:${q.primary.port || 1433}`);
+  console.log(`   SQL：${q.sqlFile}`);
+  console.log(
+    `   候選資料庫：${q.candidates.join(' → ')}` + (databaseFromSql(q.sqlText) ? '（第一個來自 SQL 裡的 USE）' : '')
+  );
 
-  let patients = null;
-  let usedDb = null;
-  let sample = [];
-  for (const database of candidates) {
-    let pool;
-    try {
-      pool = await connect({ ...primary, database }, timeout);
-      const r = await pool.request().query(stripBatchDirectives(sqlText));
-      const rec = r.recordset || [];
-      usedDb = database;
-      sample = rec.slice(0, 3);
-      patients = await fetchPatients({ request: () => ({ input() { return this; }, query: async () => ({ recordset: rec }) }) }, sqlText);
-      console.log(`   ✓ ${database}：查詢成功，${rec.length} 列`);
-      break;
-    } catch (e) {
-      console.log(`   ✗ ${database}：${e.message}`);
-    } finally {
-      if (pool) { try { await pool.close(); } catch (_) {} }
-    }
-  }
-  if (!patients) {
+  const { database: usedDb, rows, errors } = await runPatientSql(q.primary, q.candidates, q.sqlText, timeout);
+  for (const e of errors) console.log(`   ✗ ${e.database}：${e.message}`);
+  if (!usedDb) {
     console.log(`\n結論：primary 這一段就沒過。若錯誤是「無效的物件名稱 dbo.PtLocationStay」，`);
     console.log(`      表示連到的不是病人資料所在的資料庫——在 SQL 檔開頭寫 USE <資料庫>，`);
     console.log(`      或在 vitals 區塊加 "patientDatabase": "<資料庫>"，也可以直接 --patients-db <資料庫>。`);
     return;
   }
+  console.log(`   ✓ ${usedDb}：查詢成功，${rows.length} 列`);
 
   // --- 2. 查回來的內容 ---
+  const patients = indexPatientsByBed(rows);
+  const sample = rows.slice(0, 3);
   const vals = [...patients.values()];
   const nulls = (k) => vals.filter((v) => v[k] == null).length;
   console.log(`\n2. 查回來的病人：${patients.size} 個不同的 bedId`);
@@ -926,7 +916,7 @@ async function runSite(site, settings, args, registry, anchors) {
   //     這裡刻意不 await，不然 primary 慢的時候會白等。
   const wantPatients = !args.noPatients && settings.includePatients !== false;
   const patientsPromise = wantPatients
-    ? loadPatients(site, settings, registry, name, timeout, args.patientSqlFile, args.patientDb).catch((e) => {
+    ? loadPatients(site, settings, args, registry, name, timeout).catch((e) => {
         // 連 primary 都解不開名字這種設定問題也不該擋掉儀器資料
         console.warn(`  [${name}] 病人資料取不到：${e.message}（儀器資料照常輸出）`);
         return null;
@@ -938,7 +928,6 @@ async function runSite(site, settings, args, registry, anchors) {
   if (!cdsConn) throw new Error(`站台 ${name} 沒有設定 cds 連線`);
   const pool = await connect(cdsConn, timeout);
   try {
-    const tables = ring.buildTableNames(ringCfg);
     const tScan = Date.now();
     const anchorKey = `${cdsConn.server}/${cdsConn.database}`;
     const located = await locateHead(pool, ringCfg, anchors[anchorKey], windowMinutes);
@@ -1044,7 +1033,6 @@ async function runSite(site, settings, args, registry, anchors) {
       headTable: head.table,
       tablesQueried: targets.map((s) => s.table),
       dbTimeUtc: ring.fmtDb(head.maxTime),
-      parameterCount: parameterIds.length,
       count: rows.length,
       patientBeds: patients ? matchedBeds.size : null,
       unmatchedRows: patients ? unmatched : null,
@@ -1086,7 +1074,7 @@ async function main() {
   const cfg = loadConfig(args.config);
   const settings = mergeSettings(cfg);
   const outFile = args.out || settings.output;
-  const registry = buildConnectionRegistry(cfg, settings);
+  const registry = buildConnectionRegistry(cfg);
   const anchors = loadAnchors(settings.anchorCacheFile);
 
   const { sites: allSites, primaries, derived } = deriveSites(cfg, settings);
@@ -1239,10 +1227,10 @@ module.exports = {
   __main: main, // 測試用：注入假的 mssql 後可直接跑主流程
   discoverParameterIds,
   fetchPatients,
+  indexPatientsByBed,
   stripBatchDirectives,
   databaseFromSql,
   patientDatabaseCandidates,
-  checkPatients,
   fetchVitals,
   loadParameterFile,
   parseParameterList,
