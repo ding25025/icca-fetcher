@@ -74,7 +74,8 @@ function printHelp() {
 
 選項：
   -c, --config <檔案>   設定檔（預設 databases.config.json）
-  -o, --out <檔案>      輸出 JSON 檔
+  -o, --out <檔案>      輸出 JSON 檔（預設 vitals_yyyyMMddHHmm.json，到分鐘）
+                        檔名裡寫 {ts} 會換成時間戳，例如 icu_{ts}.json
   -w, --window <分鐘>   撈最近幾分鐘（預設 5）
   -s, --site <名稱>     只跑指定站台，逗號分隔，例如 cds1,cds2
       --params <檔案>   讀取你自己撈出的 parameterId 清單（JSON / CSV / 純數字都吃）
@@ -117,7 +118,9 @@ parameterId 來源優先序：
  * 要調整就在該檔加一個 "vitals" 區塊覆寫需要的項目即可。
  */
 const DEFAULTS = {
-  output: 'icca-vitals.json',
+  // {ts} 會換成執行當下的時間戳（yyyyMMddHHmm，到分鐘），例如 vitals_202607231111.json。
+  // 每跑一次就是一個新檔，排程跑出來的結果不會互相覆蓋。要固定檔名就寫死不含 {ts} 的名字。
+  output: 'vitals_{ts}.json',
   queryTimeoutMs: 60000,
   lockTimeoutMs: 3000,
   windowMinutes: 5,
@@ -843,6 +846,25 @@ function shiftTimes(row, offsetHours) {
   return out;
 }
 
+/**
+ * 檔名用的時間戳：yyyyMMddHHmm（到分鐘），例如 202607231111。
+ * 跟輸出內容用同一個時區偏移（預設 +8），所以在 UTC 的機器上跑，
+ * 檔名也不會跟檔案裡的時間差 8 小時。
+ */
+function fileStamp(offsetHours = 8, now = new Date()) {
+  const d = new Date(now.getTime() + offsetHours * 3600e3);
+  const p = (n) => String(n).padStart(2, '0');
+  return (
+    `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}` +
+    `${p(d.getUTCHours())}${p(d.getUTCMinutes())}`
+  );
+}
+
+/** 輸出檔名裡的 {ts} 換成時間戳；沒有 {ts} 的名字原樣使用（固定檔名） */
+function resolveOutputName(name, offsetHours) {
+  return String(name).replace(/\{ts\}/g, fileStamp(offsetHours));
+}
+
 // ---------- 單一站台 ----------
 async function runSite(site, settings, args, registry, anchors) {
   const name = site.name;
@@ -1073,7 +1095,11 @@ async function main() {
 
   const cfg = loadConfig(args.config);
   const settings = mergeSettings(cfg);
-  const outFile = args.out || settings.output;
+  // 檔名裡的 {ts} 在這裡就換掉，dry-run 印出來的與實際寫出的是同一個名字
+  const outFile = resolveOutputName(
+    args.out || settings.output,
+    settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8
+  );
   const registry = buildConnectionRegistry(cfg);
   const anchors = loadAnchors(settings.anchorCacheFile);
 
@@ -1232,6 +1258,8 @@ module.exports = {
   databaseFromSql,
   patientDatabaseCandidates,
   fetchVitals,
+  fileStamp,
+  resolveOutputName,
   loadParameterFile,
   parseParameterList,
   DEFAULTS,

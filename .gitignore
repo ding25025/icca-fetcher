@@ -8,6 +8,7 @@ ring_config.json
 # ---- 執行結果 ----
 icca-data.json
 icca-vitals.json
+vitals_*.json
 icca-ring-latest.json
 ring-result.json
 

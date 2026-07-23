@@ -85,7 +85,7 @@ node vitals.js --pretty
   ✓ cds1：284 筆
   ...
 合併總筆數：1820
-已輸出：C:\...\icca-vitals.json
+已輸出：C:\...\vitals_202607231111.json
 ```
 
 ### 常用變化
@@ -193,8 +193,20 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
 
 ## 輸出
 
-單一 JSON 陣列（與 `index.js` 一致）。`terseLabel` / `propName` 從 parameterId 清單帶進來，
-跟儀器自己的 `label` 並存：
+檔名預設是 **`vitals_yyyyMMddHHmm.json`**（到分鐘，例如 `vitals_202607231111.json`），
+所以排程每次跑出來的結果不會互相覆蓋。時間戳用的時區跟檔案內容一致（預設 +8），
+在 UTC 的機器上跑也不會差 8 小時。
+
+```bash
+node vitals.js                      # vitals_202607231111.json
+node vitals.js -o icu_{ts}.json     # icu_202607231111.json（{ts} 會換成時間戳）
+node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆蓋
+```
+
+固定檔名要當預設的話，在 `vitals` 區塊寫 `"output": "latest.json"`。
+
+內容是單一 JSON 陣列（與 `index.js` 一致）。`terseLabel` / `propName` 從 parameterId 清單
+帶進來，跟儀器自己的 `label` 並存：
 
 ```json
 [
