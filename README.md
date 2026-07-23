@@ -171,8 +171,8 @@ node vitals.js --help                   # 全部選項
 | `UnvalidatedDevicePeriodicData_00..25` | 監視器持續送的（HR、SpO2、動脈壓…） | 26 張環狀表，先定位寫入頭只查那一張 |
 | `UnvalidatedDeviceAperiodicData` | 間歇量測（NBP 這類，可能 15 分鐘才一筆） | 不是環狀表，就一張，直接照時間窗撈 |
 
-兩邊欄位名稱完全一樣（`bed` / `parameterId` / `numericValue` / `textValue` / `units` /
-`measurementTime` / `storeTime`），所以下游（病人對應、時區換算、輸出格式）完全共用，
+兩邊欄位名稱完全一樣（`bed` / `parameterId` / `numericValue` / `measurementTime` /
+`storeTime`），所以下游（病人對應、時區換算、輸出格式）完全共用，
 要分辨來源看 `_sourceTable` 就好。
 
 非週期性資料**不降頻**——本來就稀疏，每一筆都要留（週期性資料預設每床每分鐘每參數只留最新一筆）。
@@ -232,17 +232,12 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
     "_site": "cds1",
     "lifetimeNumber": "A123456",
     "encounterNumber": "E20260722001",
-    "ptEncounterId": 55501,
     "terseLabel": "ABP",
     "propName": "systolic",
     "_sourceTable": "UnvalidatedDevicePeriodicData_03",
     "bed": "ICU-01",
-    "deviceInstanceId": 11,
     "parameterId": 150037,
-    "label": "ABPs",
     "numericValue": 118,
-    "textValue": null,
-    "units": "mmHg",
     "measurementTime": "2026-07-22 11:24:00",
     "storeTime": "2026-07-22 11:24:05"
   }
@@ -251,10 +246,10 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
 
 | 欄位 | 來源 |
 |---|---|
-| `lifetimeNumber` / `encounterNumber` / `ptEncounterId` | primary，用**床號**對上（見下節） |
+| `lifetimeNumber` / `encounterNumber` | primary，用**床號**對上（見下節） |
 | `terseLabel` / `propName` | parameterId 清單。`ABP` + `systolic` 才分得出是收縮壓 |
-| `label` | 儀器自己回報的名稱（`ABPs`），跟 `terseLabel` 不一定一樣 |
-| `_site` / `_sourceTable` | 哪一台 CDS、哪一張環狀表 |
+| `bed` | 床號（`UdsBed.label`），也是接病人資料的鑰匙 |
+| `_site` / `_sourceTable` | 哪一台 CDS、哪一張表（週期環狀表或非週期表） |
 | `measurementTime` / `storeTime` | 已換算成本地時間（+8）；`--utc` 保留 DB 原始 UTC |
 
 加 `--with-summary` 會改成 `{ summary, rows }`，`summary` 記錄每站用了哪張表、DB 當下時間、
@@ -298,22 +293,22 @@ CDS      UdsBed.label ──────┘
 
 ```bash
 node vitals.js                              # 預設就會帶病歷號
-node vitals.js --no-patients                # 不查 primary，輸出就不含這三個欄位
+node vitals.js --no-patients                # 不查 primary，輸出就不含這兩個欄位
 node vitals.js --keep-unmatched             # 沒對到病人的床也一起輸出
 node vitals.js --patients-sql my-pt.sql     # 換一份自己的 SQL（要回傳 bed 欄）
 node vitals.js --patients-db CISPrimaryDB   # 指定病人資料在哪個資料庫
 node vitals.js --check-patients             # 病歷號是 null 時，一次問出是哪一段斷掉
 ```
 
-換自己的 SQL 時，回傳欄位必須包含 `bed`（床號），`lifetimeNumber` / `encounterNumber` /
-`ptEncounterId` 有哪個就帶哪個。`GO` 只是 SSMS 的分批指令、不是 T-SQL，會自動拿掉，
+換自己的 SQL 時，回傳欄位必須包含 `bed`（床號），`lifetimeNumber` / `encounterNumber`
+有哪個就帶哪個；其它欄位（例如 join 用的 `ptEncounterId`）撈了也不會進輸出。`GO` 只是 SSMS 的分批指令、不是 T-SQL，會自動拿掉，
 從 SSMS 直接貼過來就能用。
 
 ### 病人資料在哪個資料庫
 
 **這是病歷號會整排 null 最常見的原因。** `databases[]` 裡那筆 primary 的 `database`
 不一定是病人資料所在的資料庫（很可能是給 `index.js` 的查詢寫的），連錯的症狀就是
-`Invalid object name 'dbo.PtLocationStay'`，三個欄位一起變 `null`。
+`Invalid object name 'dbo.PtLocationStay'`，兩個欄位一起變 `null`。
 
 順序由高到低，沒指定就依序試、第一個成功的採用：
 
@@ -340,9 +335,9 @@ node vitals.js --check-patients
    ✓ CISPrimaryDB：查詢成功，38 列
 
 2. 查回來的病人：38 個不同的床號
-   空值：lifetimeNumber 0 / encounterNumber 0 / ptEncounterId 0（共 38）
+   空值：lifetimeNumber 0 / encounterNumber 0（共 38）
    前幾列：
-     bed=ICU-01  lifetimeNumber=A123456  encounterNumber=E999  ptEncounterId=55501
+     bed=ICU-01  lifetimeNumber=A123456  encounterNumber=E999
 
 3. 跟 CDS 的床號對照（UdsBed.label 對 Bed.displayLabel）
    cds1：UdsBed 32 床，其中 12 床對得上 primary（例：ICU-01、ICU-02）

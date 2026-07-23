@@ -7,8 +7,8 @@
  * vitals.js 比對前會去頭尾空白、把連續空白縮成一個、轉大寫，所以兩邊大小寫或
  * 空白不一致沒關係；但前綴、補零這種寫法差異要在這支 SQL 裡自己對齊。
  *
- * 回傳欄位必須包含 bed（床號）；lifetimeNumber / encounterNumber / ptEncounterId
- * 會原名併進輸出的每一筆資料。
+ * 回傳欄位必須包含 bed（床號）；lifetimeNumber / encounterNumber 會原名併進輸出的
+ * 每一筆資料。其它欄位（例如 join 用的 ptEncounterId）撈了也不會進輸出。
  *
  * 注意床號不像 bedId 保證唯一：不同單位若有同名的床，同一個床號會對到多位病人，
  * vitals.js 會警告並只接其中一位。真的撞號就要在這裡再限定 clinicalUnit。

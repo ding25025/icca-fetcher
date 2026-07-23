@@ -11,7 +11,7 @@
  *
  * CDS 只有床與儀器，病人在 primary。兩邊共同的鑰匙是床號（CDS 的 UdsBed.label 對
  * primary 的 Bed.displayLabel），所以每次執行會順便連 primary 跑 sql/patients.sql，
- * 把病歷號（lifetimeNumber）、住院帳號（encounterNumber）與 ptEncounterId 併進每一筆，
+ * 把病歷號（lifetimeNumber）與住院帳號（encounterNumber）併進每一筆，
  * 沒對到病人的床（空床、測試機）預設不輸出。
  * 床號比對前會去空白、轉大寫，兩邊大小寫不一致也接得起來。
  * primary 出問題時只警告，儀器資料照樣輸出（病人欄位留 null）；--no-patients 可整個關掉。
@@ -111,7 +111,7 @@ parameterId 來源優先序：
 
 病人資料：
   預設會連 primary 跑 sql/patients.sql，用「床號」把病歷號（lifetimeNumber）、
-  住院帳號（encounterNumber）與 ptEncounterId 併進每一筆，沒對到病人的床不輸出
+  住院帳號（encounterNumber）併進每一筆，沒對到病人的床不輸出
   （要保留就加 --keep-unmatched）。床號是 CDS 的 UdsBed.label 對 primary 的
   Bed.displayLabel，比對前會去空白、轉大寫。
   primary 查不到或連不上時仍會輸出儀器資料，病人欄位留 null。
@@ -476,10 +476,10 @@ function normBed(v) {
 }
 
 /**
- * 把查回來的列變成 Map<床號, { lifetimeNumber, encounterNumber, ptEncounterId }>。
+ * 把查回來的列變成 Map<床號, { lifetimeNumber, encounterNumber }>。
  *
  * 鑰匙是床號：primary 的 Bed.displayLabel 對 CDS 的 UdsBed.label。
- * 欄名就照 patients.sql 的 bed / lifetimeNumber / encounterNumber / ptEncounterId。
+ * 欄名就照 patients.sql 的 bed / lifetimeNumber / encounterNumber。
  *
  * 回傳 { byBed, duplicates }。床號不像 bedId 保證唯一——不同單位可能有同名的床，
  * 撞在一起會把病歷號接到別人身上，所以重複的要回報出來，不能默默吃掉。
@@ -493,7 +493,6 @@ function indexPatientsByBed(rows) {
     const rec = {
       lifetimeNumber: row.lifetimeNumber != null ? row.lifetimeNumber : null,
       encounterNumber: row.encounterNumber != null ? row.encounterNumber : null,
-      ptEncounterId: row.ptEncounterId != null ? row.ptEncounterId : null,
     };
     const prev = byBed.get(key);
     if (prev) {
@@ -668,17 +667,14 @@ async function checkPatients(sites, settings, args, registry) {
     console.log(`     這台 primary 現在可能真的沒有在床病人，或者床位資料在另一個資料庫。`);
     return;
   }
-  console.log(`   空值：lifetimeNumber ${nulls('lifetimeNumber')} / encounterNumber ${nulls('encounterNumber')} / ptEncounterId ${nulls('ptEncounterId')}（共 ${patients.size}）`);
+  console.log(`   空值：lifetimeNumber ${nulls('lifetimeNumber')} / encounterNumber ${nulls('encounterNumber')}（共 ${patients.size}）`);
   if (duplicates.length) {
     console.log(`   ⚠ 有 ${duplicates.length} 個床號對到多位病人：${duplicates.slice(0, 5).join(', ')}`);
     console.log(`     床號不像 bedId 保證唯一，這些床會接到其中一位，patients.sql 需要再限定單位`);
   }
   console.log(`   前幾列：`);
   for (const row of sample) {
-    console.log(
-      `     bed=${row.bed}  lifetimeNumber=${row.lifetimeNumber}` +
-        `  encounterNumber=${row.encounterNumber}  ptEncounterId=${row.ptEncounterId}`
-    );
+    console.log(`     bed=${row.bed}  lifetimeNumber=${row.lifetimeNumber}  encounterNumber=${row.encounterNumber}`);
   }
   const ptKeys = [...patients.keys()];
 
@@ -811,7 +807,7 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
   parameterIds.forEach((v, i) => req.input(`p${i}`, sql.Int, v));
 
   // bed（UdsBed.label）就是接 primary 病人資料的鑰匙，本來就要輸出，不必再多撈 bedId
-  const COLS = 'bed, parameterId, numericValue, textValue, units, measurementTime, storeTime';
+  const COLS = 'bed, parameterId, numericValue, measurementTime, storeTime';
 
   // 每床每分鐘每個參數只留最新一筆。監視器可能每幾秒送一次，降頻後資料量差很多。
   // 在 SQL 端做掉，網路傳輸與 JSON 大小一起省；要原始逐筆就關掉 perMinute。
@@ -830,8 +826,6 @@ SELECT
     b.label            AS bed,
     p.parameterId,
     p.numericValue,
-    p.textValue,
-    p.units,
     p.measurementTime,
     p.storeTime${rank}
 FROM       dbo.[${t}]         p WITH (NOLOCK)
@@ -866,8 +860,8 @@ ${body}`;
  * NBP、心輸出量這類「間歇量測」不在週期表裡，是另外一張非週期表。
  *
  * 它不是環狀表，就單純一張，所以不必定位寫入頭，直接照時間窗撈即可。
- * 欄位名稱與週期表完全一樣（bed / parameterId / numericValue / textValue / units /
- * measurementTime / storeTime），所以直接沿用 fetchVitals，撈回來併進同一個陣列，
+ * 欄位名稱與週期表完全一樣（bed / parameterId / numericValue / measurementTime /
+ * storeTime），所以直接沿用 fetchVitals，撈回來併進同一個陣列，
  * 下游（病人對應、時區換算、輸出）完全共用。
  *
  * 唯一的差別是不降頻：這種資料本來就稀疏（NBP 可能 15 分鐘才一筆），每一筆都要留。
@@ -1122,12 +1116,11 @@ async function runSite(site, settings, args, registry, anchors) {
       // 兩者來自 parameterId 清單，欄名沿用 CdsParameterMap 的原始欄名
       const base = {
         _site: name,
-        // 有要查病人才放這三欄；--no-patients 時整組不出現，不留一排 null
+        // 有要查病人才放這兩欄；--no-patients 時整組不出現，不留一排 null
         ...(wantPatients
           ? {
               lifetimeNumber: pt ? pt.lifetimeNumber : null, // 病歷號
               encounterNumber: pt ? pt.encounterNumber : null, // 住院帳號
-              ptEncounterId: pt ? pt.ptEncounterId : null,
             }
           : {}),
         terseLabel: labels[r.parameterId] || null,
