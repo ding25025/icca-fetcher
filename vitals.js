@@ -11,7 +11,8 @@
  *
  * CDS 只有床與儀器，病人在 primary。兩邊共同的鑰匙是床號（CDS 的 UdsBed.label 對
  * primary 的 Bed.displayLabel），所以每次執行會順便連 primary 跑 sql/patients.sql，
- * 把病歷號（lifetimeNumber）、住院帳號（encounterNumber）與 ptEncounterId 併進每一筆。
+ * 把病歷號（lifetimeNumber）、住院帳號（encounterNumber）與 ptEncounterId 併進每一筆，
+ * 沒對到病人的床（空床、測試機）預設不輸出。
  * 床號比對前會去空白、轉大寫，兩邊大小寫不一致也接得起來。
  * primary 出問題時只警告，儀器資料照樣輸出（病人欄位留 null）；--no-patients 可整個關掉。
  *
@@ -47,6 +48,7 @@ function parseArgs(argv) {
     const t = argv[i];
     if (t === '--config' || t === '-c') a.config = argv[++i];
     else if (t === '--no-patients') a.noPatients = true;
+    else if (t === '--keep-unmatched') a.keepUnmatched = true;
     else if (t === '--patients-sql') a.patientSqlFile = argv[++i];
     else if (t === '--patients-db') a.patientDb = argv[++i];
     else if (t === '--check-patients') a.checkPatients = true;
@@ -85,6 +87,7 @@ function printHelp() {
       --utc             時間保留 DB 原始的 UTC 值（預設已換算成本地 +8）
       --all-rows        不降頻，每筆都撈（預設每床每分鐘每參數只留最新一筆）
       --no-patients     不去 primary 查病人，輸出就不會有病歷號
+      --keep-unmatched  連沒對到病人的床也輸出（預設只留對得到病人的）
       --patients-sql <檔案>  換一份查病人的 SQL（預設 sql/patients.sql）
       --patients-db <資料庫> 病人資料在哪個資料庫（預設讀 SQL 檔裡的 USE）
       --check-patients  診斷病歷號為什麼是 null（只讀，不輸出檔案）
@@ -106,7 +109,8 @@ parameterId 來源優先序：
 
 病人資料：
   預設會連 primary 跑 sql/patients.sql，用「床號」把病歷號（lifetimeNumber）、
-  住院帳號（encounterNumber）與 ptEncounterId 併進每一筆。床號是 CDS 的 UdsBed.label 對 primary 的
+  住院帳號（encounterNumber）與 ptEncounterId 併進每一筆，沒對到病人的床不輸出
+  （要保留就加 --keep-unmatched）。床號是 CDS 的 UdsBed.label 對 primary 的
   Bed.displayLabel，比對前會去空白、轉大寫。
   primary 查不到或連不上時仍會輸出儀器資料，病人欄位留 null。
   要連哪個資料庫：--patients-db > vitals.patientDatabase > SQL 檔裡的 USE > primary 的設定。
@@ -139,6 +143,9 @@ const DEFAULTS = {
   discoverParameters: false,
   // 病人資料（primary）：用床號把病歷號接到儀器資料上
   includePatients: true,
+  // 只輸出對得到病人的床；設 false（或 --keep-unmatched）則空床的資料也一起輸出。
+  // primary 查失敗時一律不濾，否則會產出空檔案。
+  onlyMatchedBeds: true,
   patientSqlFile: 'sql/patients.sql',
   // 沒指定 patientDatabase、SQL 檔也沒寫 USE 時，最後再試這些常見名稱。
   // ICCA 的病人資料慣例上在 CISPrimaryDB，但 databases[] 裡的 primary 常寫成別的用途。
@@ -1037,17 +1044,31 @@ async function runSite(site, settings, args, registry, anchors) {
 
     // 4. 併上病人資料（primary）＋站台標記＋本地時間
     const patients = await patientsPromise;
-    let unmatched = 0;
     const matchedBeds = new Set();
+    const unmatchedBeds = new Set();
+    let dropped = 0;
+
+    if (patients) {
+      for (const r of rows) {
+        const key = normBed(r.bed);
+        (patients.has(key) ? matchedBeds : unmatchedBeds).add(key);
+      }
+    }
+
+    // 沒對到病人的床不輸出（空床、測試機、還沒收床的儀器都會落在這裡）。
+    // 但 primary 查失敗時（patients 是 null）不能濾——那時每一床都「對不到」，
+    // 一濾就變成空檔案，一次 primary 故障會看起來像全院沒資料。
+    const dropUnmatched = patients && !args.keepUnmatched && settings.onlyMatchedBeds !== false;
+    if (dropUnmatched) {
+      const before = rows.length;
+      rows = rows.filter((r) => patients.has(normBed(r.bed)));
+      dropped = before - rows.length;
+    }
 
     const offset = settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8;
     rows = rows.map((r) => {
       // 用床號對 primary：CDS 的 UdsBed.label 對 Bed.displayLabel（bed 本身照樣輸出）
       const pt = patients ? patients.get(normBed(r.bed)) : null;
-      if (patients) {
-        if (pt) matchedBeds.add(normBed(r.bed));
-        else unmatched++;
-      }
       // terseLabel 是臨床項目（HR、ABP、體溫…），propName 是細項（systolic/diastolic/mean）
       // 兩者來自 parameterId 清單，欄名沿用 CdsParameterMap 的原始欄名
       const base = {
@@ -1071,15 +1092,16 @@ async function runSite(site, settings, args, registry, anchors) {
     if (patients) {
       console.log(
         `  [${name}] 病人對應：${matchedBeds.size} 床接上病歷號` +
-          (unmatched ? `，${unmatched} 筆的床在 primary 查不到線上病人` : '')
+          (dropped ? `，捨棄 ${unmatchedBeds.size} 床 / ${dropped} 筆沒對到病人的資料` : '') +
+          (!dropUnmatched && unmatchedBeds.size ? `，${unmatchedBeds.size} 床沒對到（保留輸出）` : '')
       );
       // 一床都對不上通常不是「病人沒躺床」，是兩邊床號的寫法不一樣（前綴、補零、全形）。
-      // 把雙方的樣本印出來，一眼就看得出來。
+      // 這時 rows 已經被濾空，所以樣本要從 unmatchedBeds 拿。
       if (!matchedBeds.size && patients.size) {
-        const cdsSample = [...new Set(rows.map((r) => r.bed))].slice(0, 5).join(', ');
+        const cdsSample = [...unmatchedBeds].slice(0, 5).join(', ');
         const ptSample = [...patients.keys()].slice(0, 5).join(', ');
         console.warn(
-          `  ⚠ [${name}] 一床都對不上——CDS 的床號例：${cdsSample}；primary 的床號例：${ptSample}\n` +
+          `  ⚠ [${name}] 一床都對不上，這站等於沒有資料——CDS 的床號例：${cdsSample}；primary 的床號例：${ptSample}\n` +
             `      兩邊寫法不同的話要調整 patients.sql，先跑 node vitals.js --check-patients`
         );
       }
@@ -1093,7 +1115,8 @@ async function runSite(site, settings, args, registry, anchors) {
       dbTimeUtc: ring.fmtDb(head.maxTime),
       count: rows.length,
       patientBeds: patients ? matchedBeds.size : null,
-      unmatchedRows: patients ? unmatched : null,
+      unmatchedBeds: patients ? unmatchedBeds.size : null,
+      droppedRows: patients ? dropped : null,
       scanMs,
       fetchMs,
       rows,
@@ -1244,7 +1267,8 @@ async function main() {
         dbTimeUtc: s.value.dbTimeUtc,
         count: s.value.count,
         patientBeds: s.value.patientBeds,
-        unmatchedRows: s.value.unmatchedRows,
+        unmatchedBeds: s.value.unmatchedBeds,
+        droppedRows: s.value.droppedRows,
         scanMs: s.value.scanMs,
         fetchMs: s.value.fetchMs,
       });

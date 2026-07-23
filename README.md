@@ -262,7 +262,7 @@ CDS      UdsBed.label ──────┘
 
 ```
   [primary db1] 線上病人：38 床（sql/patients.sql）
-  [cds1] 病人對應：12 床接上病歷號，4 筆的床在 primary 查不到線上病人
+  [cds1] 病人對應：12 床接上病歷號，捨棄 4 床 / 37 筆沒對到病人的資料
 ```
 
 幾個刻意的設計：
@@ -271,13 +271,17 @@ CDS      UdsBed.label ──────┘
   病人欄位留 `null`。排程每 5 分鐘跑一次，不該被 primary 拖垮。
 - **與 CDS 並行**：病人查詢一開始就發出去，跟環狀表定位、撈資料同時進行，不會多花時間。
 - **一台 primary 只查一次**：七台 CDS 共用同一台 primary 時，查詢只發一次，結果共用。
-- **空床照樣輸出**：床上沒有線上病人（或床號對不上）時三個欄位是 `null`，資料不會被丟掉。
+- **沒對到病人的床不輸出**：空床、測試機、還沒收床的儀器都會被濾掉，輸出的每一筆都有病歷號。
+  要保留就加 `--keep-unmatched`（或在 `vitals` 區塊寫 `"onlyMatchedBeds": false`）。
+- **但 primary 失敗時不濾**：查不到病人時每一床都「對不到」，一濾就是空檔案，
+  一次 primary 故障會看起來像全院沒資料。那種情況照舊全部輸出，病人欄位留 `null`。
 - **撞號會講**：床號不像 `bedId` 保證唯一，同一個床號對到多位病人時會警告並只接其中一位，
   那表示 `patients.sql` 需要再限定單位（`clinicalUnit`）。
 
 ```bash
 node vitals.js                              # 預設就會帶病歷號
 node vitals.js --no-patients                # 不查 primary，輸出就不含這三個欄位
+node vitals.js --keep-unmatched             # 沒對到病人的床也一起輸出
 node vitals.js --patients-sql my-pt.sql     # 換一份自己的 SQL（要回傳 bed 欄）
 node vitals.js --patients-db CISPrimaryDB   # 指定病人資料在哪個資料庫
 node vitals.js --check-patients             # 病歷號是 null 時，一次問出是哪一段斷掉
