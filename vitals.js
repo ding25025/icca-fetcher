@@ -6,8 +6,13 @@
  * -------------------------------------------------
  * 設定只有一份：databases.config.json。程式會從 databases[] 自動分辨
  *   資料庫名稱是 CDSUnvalidatedData* → CDS，要撈儀器資料的站台
- *   其餘                            → primary，--discover 查 parameterId 用
+ *   其餘                            → primary，查病人（與 --discover 的 parameterId）用
  * 連線資訊（IP / 帳密）不必再抄一份到別的檔案。
+ *
+ * CDS 只有床與儀器，病人在 primary。兩邊共同的鑰匙是 bedId，所以每次執行會順便連
+ * primary 跑 sql/patients.sql，把病歷號（lifetimeNumber）、住院帳號（encounterNumber）
+ * 與 ptEncounterId 併進每一筆。bedId 本身只是鑰匙，不會出現在輸出裡。
+ * primary 出問題時只警告，儀器資料照樣輸出（病人欄位留 null）；--no-patients 可整個關掉。
  *
  * 重點：不要查 dbo.UnvalidatedDevicePeriodicData 這個 view。
  *   view 是 26 張表的 UNION，撈近 5 分鐘的資料也得掃過全部 26 張。
@@ -40,6 +45,8 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i++) {
     const t = argv[i];
     if (t === '--config' || t === '-c') a.config = argv[++i];
+    else if (t === '--no-patients') a.noPatients = true;
+    else if (t === '--patients-sql') a.patientSqlFile = argv[++i];
     else if (t === '--out' || t === '-o') a.out = argv[++i];
     else if (t === '--pretty' || t === '-p') a.pretty = true;
     else if (t === '--window' || t === '-w') a.window = Number(argv[++i]);
@@ -74,6 +81,8 @@ function printHelp() {
       --discover        先連 primary 查出 parameterId 清單（跑 sql/parameters.sql）
       --utc             時間保留 DB 原始的 UTC 值（預設已換算成本地 +8）
       --all-rows        不降頻，每筆都撈（預設每床每分鐘每參數只留最新一筆）
+      --no-patients     不去 primary 查病人，輸出就不會有病歷號
+      --patients-sql <檔案>  換一份查病人的 SQL（預設 sql/patients.sql）
       --with-summary    輸出包成 { summary, rows }（預設是單純的資料陣列）
   -n, --dry-run        只檢查設定，不連資料庫（換機器時先跑這個）
       --convert <檔案>  把 parameterId 清單轉成 JSON 後結束，不連資料庫
@@ -89,6 +98,11 @@ function printHelp() {
 parameterId 來源優先序：
   --param  >  --params / parameterIdsFile  >  站台 parameterIds  >  vitals.parameterIds
   --discover 會蓋掉以上全部。實際採用哪個來源會印在執行訊息裡。
+
+病人資料：
+  預設會連 primary 跑 sql/patients.sql，用 bedId 把病歷號（lifetimeNumber）、
+  住院帳號（encounterNumber）與 ptEncounterId 併進每一筆。bedId 只是鑰匙，不輸出。
+  primary 查不到或連不上時仍會輸出儀器資料，病人欄位留 null。
 `);
 }
 
@@ -112,6 +126,9 @@ const DEFAULTS = {
   parameterIdsFile: 'sql/parameter-ids.txt',
   parameterSqlFile: 'sql/parameters.sql',
   discoverParameters: false,
+  // 病人資料（primary）：用 bedId 把病歷號接到儀器資料上
+  includePatients: true,
+  patientSqlFile: 'sql/patients.sql',
   defaultPrimary: null,
   // CDS 資料庫的判斷方式（用來從 databases[] 裡自動分辨 cds 與 primary）
   cdsDatabasePattern: '^CDSUnvalidatedData',
@@ -407,6 +424,83 @@ async function discoverParameterIds(pool, sqlText) {
   return out;
 }
 
+// ---------- 從 primary 撈目前在床的病人 ----------
+
+/**
+ * 把 SSMS 習慣寫的 USE / GO 拿掉。
+ * 連哪個資料庫由設定檔決定，而 mssql 一次送的是單一批次，GO 只是 SSMS 的分批指令，
+ * 留著會變成語法錯誤。直接把 sql 檔從 SSMS 貼過來也能跑。
+ */
+function stripBatchDirectives(sqlText) {
+  return String(sqlText)
+    .replace(/^﻿/, '')
+    .replace(/^[ \t]*USE[ \t]+[^\r\n;]+;?[ \t]*$/gim, '')
+    .replace(/^[ \t]*GO[ \t]*;?[ \t]*$/gim, '');
+}
+
+/**
+ * 回傳 Map<bedId, { lifetimeNumber, encounterNumber, ptEncounterId }>。
+ * bedId 兩邊同一組值（primary 的 PtLocationStay.bedId、CDS 的 UdsBed.bedId），
+ * 是唯一能把儀器資料接到病人身上的鑰匙。
+ */
+async function fetchPatients(pool, sqlText) {
+  const r = await pool.request().query(stripBatchDirectives(sqlText));
+  const byBed = new Map();
+  for (const row of r.recordset || []) {
+    if (row.bedId == null) continue;
+    const key = String(row.bedId);
+    // 同一張床理論上只會有一位線上病人；真的重複就以先出現的為準（SQL 已 ORDER BY bedId）
+    if (byBed.has(key)) continue;
+    byBed.set(key, {
+      lifetimeNumber: row.lifetimeNumber != null ? row.lifetimeNumber : null,
+      encounterNumber: row.encounterNumber != null ? row.encounterNumber : null,
+      ptEncounterId: row.ptEncounterId != null ? row.ptEncounterId : null,
+    });
+  }
+  return byBed;
+}
+
+/**
+ * 查病人是「有就加分」的事：primary 連不上、SQL 檔不見、查詢失敗，都只警告，
+ * 儀器資料照樣輸出，病人欄位留 null。不要讓 primary 拖垮整個排程。
+ * 多個 CDS 共用同一台 primary 時只查一次（primaryCache）。
+ */
+async function loadPatients(site, settings, registry, siteName, timeout, sqlFileOverride) {
+  const sqlFile = sqlFileOverride || site.patientSqlFile || settings.patientSqlFile;
+  if (!sqlFile) return null;
+  const abs = path.resolve(process.cwd(), sqlFile);
+  if (!fs.existsSync(abs)) {
+    console.warn(`  [${siteName}] 找不到病人 SQL ${abs}，這次不帶病歷號`);
+    return null;
+  }
+
+  const primaryRef = site.primary || settings.defaultPrimary;
+  if (!primaryRef) {
+    console.warn(`  [${siteName}] 沒有可用的 primary（站台 primary 或 defaultPrimary），這次不帶病歷號`);
+    return null;
+  }
+  const primary = resolveConn(primaryRef, registry, 'primary', siteName);
+  const key = typeof primaryRef === 'string' ? primaryRef : `${primary.server}/${primary.database}`;
+  const sqlText = fs.readFileSync(abs, 'utf8');
+
+  // 失敗在快取的函式裡面就吃掉，讓它一律 resolve；否則被共用的 promise 一旦 reject，
+  // 還沒接上 handler 的站台會冒出 unhandled rejection。
+  return discoverOnce(`patients:${key}`, async () => {
+    let pool;
+    try {
+      pool = await connect(primary, timeout);
+      const byBed = await fetchPatients(pool, sqlText);
+      console.log(`  [primary ${key}] 線上病人：${byBed.size} 床（${sqlFile}）`);
+      return byBed;
+    } catch (e) {
+      console.warn(`  [primary ${key}] 查病人資料失敗：${e.message}（儀器資料照常輸出，病人欄位留空）`);
+      return null;
+    } finally {
+      if (pool) { try { await pool.close(); } catch (_) {} }
+    }
+  });
+}
+
 // ---------- 表號錨點快取 ----------
 // 記住「某張表對應某個 DB 時刻」，下次就能用算的，不必再掃 26 張表。
 // 這是純快取，刪掉只會讓下一次退回完整掃描，不影響正確性。
@@ -495,7 +589,8 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
   const req = pool.request().input('win', sql.Int, windowMinutes);
   parameterIds.forEach((v, i) => req.input(`p${i}`, sql.Int, v));
 
-  const COLS = 'bed, parameterId, numericValue, textValue, units, measurementTime, storeTime';
+  // bedId 是拿來接 primary 病人資料的鑰匙，合併完就從輸出裡拿掉
+  const COLS = 'bedId, bed, parameterId, numericValue, textValue, units, measurementTime, storeTime';
 
   // 每床每分鐘每個參數只留最新一筆。監視器可能每幾秒送一次，降頻後資料量差很多。
   // 在 SQL 端做掉，網路傳輸與 JSON 大小一起省；要原始逐筆就關掉 perMinute。
@@ -511,6 +606,7 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
 
   const inner = `
 SELECT
+    b.bedId,
     b.label            AS bed,
     p.parameterId,
     p.numericValue,
@@ -632,7 +728,7 @@ async function runSite(site, settings, args, registry, anchors) {
 
     // 多個 CDS 共用同一台 primary 時只查一次
     const key = typeof primaryRef === 'string' ? primaryRef : `${primary.server}/${primary.database}`;
-    const found = await discoverOnce(key, async () => {
+    const found = await discoverOnce(`params:${key}`, async () => {
       const pool = await connect(primary, timeout);
       try {
         return await discoverParameterIds(pool, sqlText);
@@ -653,6 +749,17 @@ async function runSite(site, settings, args, registry, anchors) {
 
   if (!parameterIds.length) throw new Error(`站台 ${name} 沒有任何 parameterId 可撈`);
   console.log(`  [${name}] parameterId：${parameterIds.length} 個（來源：${source}）`);
+
+  // 1.5 病人資料先發出去，跟 CDS 的查詢並行跑，最後再用 bedId 併起來。
+  //     這裡刻意不 await，不然 primary 慢的時候會白等。
+  const wantPatients = !args.noPatients && settings.includePatients !== false;
+  const patientsPromise = wantPatients
+    ? loadPatients(site, settings, registry, name, timeout, args.patientSqlFile).catch((e) => {
+        // 連 primary 都解不開名字這種設定問題也不該擋掉儀器資料
+        console.warn(`  [${name}] 病人資料取不到：${e.message}（儀器資料照常輸出）`);
+        return null;
+      })
+    : Promise.resolve(null);
 
   // 2. 連 CDS，定位目前的寫入頭
   const cdsConn = resolveConn(site.cds, registry, 'cds', name);
@@ -707,20 +814,46 @@ async function runSite(site, settings, args, registry, anchors) {
       }
     }
 
-    // 補上站台標記與（可選的）本地時間
+    // 4. 併上病人資料（primary）＋站台標記＋本地時間
+    const patients = await patientsPromise;
+    let unmatched = 0;
+    const matchedBeds = new Set();
+
     const offset = settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8;
     rows = rows.map((r) => {
+      // bedId 只是接 primary 的鑰匙，不放進輸出
+      const { bedId, ...rest } = r;
+      const pt = patients ? patients.get(String(bedId)) : null;
+      if (patients) {
+        if (pt) matchedBeds.add(String(bedId));
+        else unmatched++;
+      }
       // terseLabel 是臨床項目（HR、ABP、體溫…），propName 是細項（systolic/diastolic/mean）
       // 兩者來自 parameterId 清單，欄名沿用 CdsParameterMap 的原始欄名
       const base = {
         _site: name,
+        // 有要查病人才放這三欄；--no-patients 時整組不出現，不留一排 null
+        ...(wantPatients
+          ? {
+              lifetimeNumber: pt ? pt.lifetimeNumber : null, // 病歷號
+              encounterNumber: pt ? pt.encounterNumber : null, // 住院帳號
+              ptEncounterId: pt ? pt.ptEncounterId : null,
+            }
+          : {}),
         terseLabel: labels[r.parameterId] || null,
         propName: props[r.parameterId] || null,
-        ...r,
+        ...rest,
       };
       // 預設把時間換算成本地時區；--utc 則保留 DB 原始的 UTC 值
       return args.utc || settings.timesInUtc ? base : shiftTimes(base, offset);
     });
+
+    if (patients) {
+      console.log(
+        `  [${name}] 病人對應：${matchedBeds.size} 床接上病歷號` +
+          (unmatched ? `，${unmatched} 筆的床在 primary 查不到線上病人` : '')
+      );
+    }
 
     return {
       name,
@@ -730,6 +863,8 @@ async function runSite(site, settings, args, registry, anchors) {
       dbTimeUtc: ring.fmtDb(head.maxTime),
       parameterCount: parameterIds.length,
       count: rows.length,
+      patientBeds: patients ? matchedBeds.size : null,
+      unmatchedRows: patients ? unmatched : null,
       scanMs,
       fetchMs,
       rows,
@@ -810,6 +945,27 @@ async function main() {
     }
     if (!ids.length) console.warn('⚠ 沒有任何 parameterId，實際執行會失敗');
 
+    // 病人資料
+    const wantPatients = !args.noPatients && settings.includePatients !== false;
+    const ptFile = args.patientSqlFile || settings.patientSqlFile;
+    if (!wantPatients) {
+      console.log(`\n病人資料：不查（--no-patients / includePatients=false）`);
+    } else if (!ptFile) {
+      console.log(`\n病人資料：沒有設定 patientSqlFile，不會帶病歷號`);
+    } else if (!fs.existsSync(path.resolve(process.cwd(), ptFile))) {
+      console.log(`\n病人資料：⚠ 找不到 ${ptFile}，實際執行時會略過病歷號`);
+    } else {
+      const primaryRef = settings.defaultPrimary;
+      if (!primaryRef) {
+        console.log(`\n病人資料：⚠ 沒有可用的 primary，實際執行時會略過病歷號`);
+      } else {
+        const pc = resolveConn(primaryRef, registry, 'primary', 'primary');
+        console.log(
+          `\n病人資料：${ptFile} → primary ${primaryRef}（${pc.server}:${pc.port || 1433} ${pc.database}），用 bedId 對應`
+        );
+      }
+    }
+
     console.log(`\n時間窗：近 ${args.window || settings.windowMinutes} 分鐘（用 DB 端 GETUTCDATE()）`);
     console.log(`環狀表：${settings.ring.tablePrefix}${String(settings.ring.start).padStart(settings.ring.pad, '0')} ~ 共 ${settings.ring.count} 張，head 依 ${settings.ring.headColumn}`);
     console.log(`\n要查的站台：`);
@@ -847,6 +1003,8 @@ async function main() {
         tablesQueried: s.value.tablesQueried,
         dbTimeUtc: s.value.dbTimeUtc,
         count: s.value.count,
+        patientBeds: s.value.patientBeds,
+        unmatchedRows: s.value.unmatchedRows,
         scanMs: s.value.scanMs,
         fetchMs: s.value.fetchMs,
       });
@@ -890,6 +1048,8 @@ if (require.main === module) {
 module.exports = {
   __main: main, // 測試用：注入假的 mssql 後可直接跑主流程
   discoverParameterIds,
+  fetchPatients,
+  stripBatchDirectives,
   fetchVitals,
   loadParameterFile,
   parseParameterList,

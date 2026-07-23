@@ -168,7 +168,8 @@ node vitals.js --help                   # 全部選項
 node vitals.js --pretty          # 七台 CDS 平行，近 5 分鐘
 node vitals.js -w 15             # 改抓近 15 分鐘
 node vitals.js --site cds1,cds2  # 只跑指定站台
-node vitals.js --local           # 時間附上台灣時區欄位
+node vitals.js --utc             # 時間保留 DB 原始的 UTC
+node vitals.js --no-patients     # 不去 primary 查病人（輸出就沒有病歷號）
 node vitals.js --discover        # parameterId 改由 primary 動態查
 ```
 
@@ -176,7 +177,9 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
 從 databases.config.json 認出 7 個 CDS：cds1, ..., cds7　primary：db1
 開始平行查詢 7 個站台...
   [cds1] parameterId：48 個（來源：sql/parameter-ids.txt）
+  [primary db1] 線上病人：38 床（sql/patients.sql）
   [cds1] head=UnvalidatedDevicePeriodicData_19（2026-07-22 03:24:00 UTC），近 5 分鐘需查 1 張表：..._19
+  [cds1] 病人對應：12 床接上病歷號
   [cds2] head=UnvalidatedDevicePeriodicData_07（2026-07-22 03:24:00 UTC），近 5 分鐘需查 2 張表：..._07, ..._06
   ✓ cds1：284 筆（UnvalidatedDevicePeriodicData_19）
   ✓ cds2：196 筆（UnvalidatedDevicePeriodicData_07）
@@ -197,6 +200,9 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
 [
   {
     "_site": "cds1",
+    "lifetimeNumber": "A123456",
+    "encounterNumber": "E20260722001",
+    "ptEncounterId": 55501,
     "terseLabel": "ABP",
     "propName": "systolic",
     "_sourceTable": "UnvalidatedDevicePeriodicData_03",
@@ -207,22 +213,62 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
     "numericValue": 118,
     "textValue": null,
     "units": "mmHg",
-    "measurementTime": "2026-07-22T03:24:00.000Z",
-    "storeTime": "2026-07-22T03:24:05.000Z",
+    "measurementTime": "2026-07-22 11:24:00",
+    "storeTime": "2026-07-22 11:24:05"
   }
 ]
 ```
 
 | 欄位 | 來源 |
 |---|---|
+| `lifetimeNumber` / `encounterNumber` / `ptEncounterId` | primary，用 `bedId` 對上（見下節） |
 | `terseLabel` / `propName` | parameterId 清單。`ABP` + `systolic` 才分得出是收縮壓 |
 | `label` | 儀器自己回報的名稱（`ABPs`），跟 `terseLabel` 不一定一樣 |
 | `_site` / `_sourceTable` | 哪一台 CDS、哪一張環狀表 |
-| `measurementTime` / `storeTime` | DB 原值，**UTC** |
-| `...Local` | 只有加 `--local` 才有，換算成 +8 |
+| `measurementTime` / `storeTime` | 已換算成本地時間（+8）；`--utc` 保留 DB 原始 UTC |
 
 加 `--with-summary` 會改成 `{ summary, rows }`，`summary` 記錄每站用了哪張表、DB 當下時間、
-筆數或錯誤。單站失敗不影響其它站，失敗原因會在 summary 與主控台裡。
+筆數、接上病歷號的床數或錯誤。單站失敗不影響其它站，失敗原因會在 summary 與主控台裡。
+
+## 病人資料（病歷號怎麼接上來）
+
+CDS 只有床與儀器，沒有人。病人在 primary（`CISPrimaryDB` / `ICCA_DB0x`），兩邊唯一的共同鑰匙
+是 **`bedId`**：
+
+```
+primary  PtLocationStay.bedId ──┐
+                                ├── 同一組值
+CDS      UdsBed.bedId ──────────┘
+```
+
+所以每次執行會順便連 primary 跑 [sql/patients.sql](sql/patients.sql)，撈出目前在床
+（`endDate IS NULL`）的病人，再用 `bedId` 併進每一筆資料。`bedId` 只是鑰匙，**不會**出現在輸出裡。
+
+```
+  [primary db1] 線上病人：38 床（sql/patients.sql）
+  [cds1] 病人對應：12 床接上病歷號，4 筆的床在 primary 查不到線上病人
+```
+
+幾個刻意的設計：
+
+- **不擋路**：primary 連不上、SQL 檔不見、查詢逾時，都只警告，儀器資料照樣輸出，
+  病人欄位留 `null`。排程每 5 分鐘跑一次，不該被 primary 拖垮。
+- **與 CDS 並行**：病人查詢一開始就發出去，跟環狀表定位、撈資料同時進行，不會多花時間。
+- **一台 primary 只查一次**：七台 CDS 共用同一台 primary 時，查詢只發一次，結果共用。
+- **空床照樣輸出**：床上沒有線上病人（或 `bedId` 對不上）時三個欄位是 `null`，資料不會被丟掉。
+
+```bash
+node vitals.js                              # 預設就會帶病歷號
+node vitals.js --no-patients                # 不查 primary，輸出就不含這三個欄位
+node vitals.js --patients-sql my-pt.sql     # 換一份自己的 SQL（要回傳 bedId 欄）
+```
+
+換自己的 SQL 時，回傳欄位必須包含 `bedId`，`lifetimeNumber` / `encounterNumber` /
+`ptEncounterId` 有哪個就帶哪個。檔案裡的 `USE xxx` 與 `GO` 會自動被拿掉——連哪個資料庫由
+`databases.config.json` 決定，`GO` 也只是 SSMS 的分批指令，所以從 SSMS 直接貼過來就能用。
+
+primary 是誰？跟 `--discover` 同一套：站台的 `primary`，沒有的話用 `vitals.defaultPrimary`，
+再沒有就用 `databases[]` 裡第一個非 CDS 的資料庫（本院是 `db1`）。`--dry-run` 會印出實際會連哪一台。
 
 ## parameterId 從哪來
 

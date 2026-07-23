@@ -36,6 +36,8 @@
   "_comment_vitals": "vitals.js 專用設定，全部可省略（見 vitals.js 的 DEFAULTS）。index.js 不會讀這一段。站台由 databases[] 自動辨識：database 名稱符合 ^CDSUnvalidatedData 的當成 CDS，其餘當成 primary。",
   "vitals": {
     "windowMinutes": 5,
-    "parameterIdsFile": "sql/parameter-ids.txt"
+    "parameterIdsFile": "sql/parameter-ids.txt",
+    "includePatients": true,
+    "patientSqlFile": "sql/patients.sql"
   }
 }
