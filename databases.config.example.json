@@ -38,6 +38,8 @@
     "windowMinutes": 5,
     "parameterIdsFile": "sql/parameter-ids.txt",
     "includePatients": true,
-    "patientSqlFile": "sql/patients.sql"
+    "patientSqlFile": "sql/patients.sql",
+    "_comment_patientDatabase": "病人資料在哪個資料庫。不寫的話會依序試 primary 的 database、再試 CISPrimaryDB；用 node vitals.js --check-patients 可以問出實際是哪一個。",
+    "patientDatabase": "CISPrimaryDB"
   }
 }

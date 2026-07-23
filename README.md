@@ -261,11 +261,71 @@ CDS      UdsBed.bedId ──────────┘
 node vitals.js                              # 預設就會帶病歷號
 node vitals.js --no-patients                # 不查 primary，輸出就不含這三個欄位
 node vitals.js --patients-sql my-pt.sql     # 換一份自己的 SQL（要回傳 bedId 欄）
+node vitals.js --patients-db CISPrimaryDB   # 指定病人資料在哪個資料庫
+node vitals.js --check-patients             # 病歷號是 null 時，一次問出是哪一段斷掉
 ```
 
 換自己的 SQL 時，回傳欄位必須包含 `bedId`，`lifetimeNumber` / `encounterNumber` /
-`ptEncounterId` 有哪個就帶哪個。檔案裡的 `USE xxx` 與 `GO` 會自動被拿掉——連哪個資料庫由
-`databases.config.json` 決定，`GO` 也只是 SSMS 的分批指令，所以從 SSMS 直接貼過來就能用。
+`ptEncounterId` 有哪個就帶哪個。`GO` 只是 SSMS 的分批指令、不是 T-SQL，會自動拿掉，
+從 SSMS 直接貼過來就能用。
+
+### 病人資料在哪個資料庫
+
+**這是病歷號會整排 null 最常見的原因。** `databases[]` 裡那筆 primary 的 `database`
+不一定是病人資料所在的資料庫（很可能是給 `index.js` 的查詢寫的），連錯的症狀就是
+`Invalid object name 'dbo.PtLocationStay'`，三個欄位一起變 `null`。
+
+順序由高到低，沒指定就依序試、第一個成功的採用：
+
+| 來源 | 用法 |
+|---|---|
+| `--patients-db <資料庫>` | 臨時試 |
+| `vitals.patientDatabase` | 設定檔裡釘死（確定之後建議寫這個） |
+| SQL 檔開頭的 `USE <資料庫>` | 從 SSMS 貼過來時通常就帶著了；這行不會送給 SQL Server，只用來決定連線目標 |
+| primary 連線設定的 `database` | 預設 |
+| `CISPrimaryDB` | ICCA 的慣例名稱，最後才試 |
+
+### 病歷號是 null 怎麼查
+
+```bash
+node vitals.js --check-patients
+```
+
+只讀資料、不輸出檔案，把三段各跑一次並印出實際數字，直接指出是哪一種：
+
+```
+1. primary：db1 → 172.30.24.134:1433
+   候選資料庫：ICCA_DB01 → CISPrimaryDB
+   ✗ ICCA_DB01：Invalid object name 'dbo.PtLocationStay'.
+   ✓ CISPrimaryDB：查詢成功，38 列
+
+2. 查回來的病人：38 個不同的 bedId
+   空值：lifetimeNumber 0 / encounterNumber 0 / ptEncounterId 0（共 38）
+   前幾列：
+     bedId=5001  lifetimeNumber=A123456  encounterNumber=E999  ptEncounterId=55501
+
+3. 跟 CDS 的 bedId 對照（UdsBed）
+   cds1：UdsBed 32 床，其中 12 床對得上 primary（例：5001=ICU-01）
+
+結論：
+  ✓ 三段都通（primary=CISPrimaryDB）。
+```
+
+| 卡在哪一段 | 意思 | 怎麼修 |
+|---|---|---|
+| 1 全部 ✗ | 連錯資料庫或沒權限 | 照上表指定 `patientDatabase` |
+| 2 是 0 列 | 那台 primary 現在真的沒有在床病人，或床位資料在別的庫 | 用 SSMS 跑一次 `sql/patients.sql` 對照 |
+| 2 有列但 `lifetimeNumber` 空值很多 | 查得到人，但 `Patient.lifetimeNumber` 本來就沒填 | 要改抓別的欄位（病歷號可能在別處） |
+| 3 是 0 床對得上 | 兩邊的 `bedId` 不是同一組值 | 改用別的對應鍵（例如床號 `label`），`patients.sql` 一起調整 |
+
+正常執行時這些狀況也會出現在主控台，不會默默變成 null：
+
+```
+  ⚠ [primary db1] 查病人資料失敗，病歷號會是 null（儀器資料照常輸出）
+      ICCA_DB01：Invalid object name 'dbo.PtLocationStay'.
+      診斷：node vitals.js --check-patients
+  ⚠ [cds1] 一床都對不上——CDS 的 bedId 例：7001, 7002；primary 的 bedId 例：101, 102
+```
 
 primary 是誰？跟 `--discover` 同一套：站台的 `primary`，沒有的話用 `vitals.defaultPrimary`，
 再沒有就用 `databases[]` 裡第一個非 CDS 的資料庫（本院是 `db1`）。`--dry-run` 會印出實際會連哪一台。
