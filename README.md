@@ -233,7 +233,7 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
 
 | 欄位 | 來源 |
 |---|---|
-| `lifetimeNumber` / `encounterNumber` / `ptEncounterId` | primary，用 `bedId` 對上（見下節） |
+| `lifetimeNumber` / `encounterNumber` / `ptEncounterId` | primary，用**床號**對上（見下節） |
 | `terseLabel` / `propName` | parameterId 清單。`ABP` + `systolic` 才分得出是收縮壓 |
 | `label` | 儀器自己回報的名稱（`ABPs`），跟 `terseLabel` 不一定一樣 |
 | `_site` / `_sourceTable` | 哪一台 CDS、哪一張環狀表 |
@@ -244,17 +244,21 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
 
 ## 病人資料（病歷號怎麼接上來）
 
-CDS 只有床與儀器，沒有人。病人在 primary（`CISPrimaryDB` / `ICCA_DB0x`），兩邊唯一的共同鑰匙
-是 **`bedId`**：
+CDS 只有床與儀器，沒有人。病人在 primary（`CISPrimaryDB` / `ICCA_DB0x`），兩邊接起來的鑰匙
+是 **床號**：
 
 ```
-primary  PtLocationStay.bedId ──┐
-                                ├── 同一組值
-CDS      UdsBed.bedId ──────────┘
+primary  Bed.displayLabel ──┐
+                            ├── 同一組床號（比對前去空白、轉大寫）
+CDS      UdsBed.label ──────┘
 ```
 
 所以每次執行會順便連 primary 跑 [sql/patients.sql](sql/patients.sql)，撈出目前在床
-（`endDate IS NULL`）的病人，再用 `bedId` 併進每一筆資料。`bedId` 只是鑰匙，**不會**出現在輸出裡。
+（`endDate IS NULL`）的病人，再用床號併進每一筆資料。床號本來就在輸出的 `bed` 欄位裡。
+
+> 床號比對前會先正規化：去掉頭尾空白、內部連續空白縮成一個、轉大寫，所以
+> `" icu-01 "` 與 `"ICU-01"` 視為同一床。前綴或補零這種寫法差異（`6F-ICU-01` vs `ICU-01`）
+> 則要在 `patients.sql` 裡自己對齊。
 
 ```
   [primary db1] 線上病人：38 床（sql/patients.sql）
@@ -267,17 +271,19 @@ CDS      UdsBed.bedId ──────────┘
   病人欄位留 `null`。排程每 5 分鐘跑一次，不該被 primary 拖垮。
 - **與 CDS 並行**：病人查詢一開始就發出去，跟環狀表定位、撈資料同時進行，不會多花時間。
 - **一台 primary 只查一次**：七台 CDS 共用同一台 primary 時，查詢只發一次，結果共用。
-- **空床照樣輸出**：床上沒有線上病人（或 `bedId` 對不上）時三個欄位是 `null`，資料不會被丟掉。
+- **空床照樣輸出**：床上沒有線上病人（或床號對不上）時三個欄位是 `null`，資料不會被丟掉。
+- **撞號會講**：床號不像 `bedId` 保證唯一，同一個床號對到多位病人時會警告並只接其中一位，
+  那表示 `patients.sql` 需要再限定單位（`clinicalUnit`）。
 
 ```bash
 node vitals.js                              # 預設就會帶病歷號
 node vitals.js --no-patients                # 不查 primary，輸出就不含這三個欄位
-node vitals.js --patients-sql my-pt.sql     # 換一份自己的 SQL（要回傳 bedId 欄）
+node vitals.js --patients-sql my-pt.sql     # 換一份自己的 SQL（要回傳 bed 欄）
 node vitals.js --patients-db CISPrimaryDB   # 指定病人資料在哪個資料庫
 node vitals.js --check-patients             # 病歷號是 null 時，一次問出是哪一段斷掉
 ```
 
-換自己的 SQL 時，回傳欄位必須包含 `bedId`，`lifetimeNumber` / `encounterNumber` /
+換自己的 SQL 時，回傳欄位必須包含 `bed`（床號），`lifetimeNumber` / `encounterNumber` /
 `ptEncounterId` 有哪個就帶哪個。`GO` 只是 SSMS 的分批指令、不是 T-SQL，會自動拿掉，
 從 SSMS 直接貼過來就能用。
 
@@ -311,13 +317,13 @@ node vitals.js --check-patients
    ✗ ICCA_DB01：Invalid object name 'dbo.PtLocationStay'.
    ✓ CISPrimaryDB：查詢成功，38 列
 
-2. 查回來的病人：38 個不同的 bedId
+2. 查回來的病人：38 個不同的床號
    空值：lifetimeNumber 0 / encounterNumber 0 / ptEncounterId 0（共 38）
    前幾列：
-     bedId=5001  lifetimeNumber=A123456  encounterNumber=E999  ptEncounterId=55501
+     bed=ICU-01  lifetimeNumber=A123456  encounterNumber=E999  ptEncounterId=55501
 
-3. 跟 CDS 的 bedId 對照（UdsBed）
-   cds1：UdsBed 32 床，其中 12 床對得上 primary（例：5001=ICU-01）
+3. 跟 CDS 的床號對照（UdsBed.label 對 Bed.displayLabel）
+   cds1：UdsBed 32 床，其中 12 床對得上 primary（例：ICU-01、ICU-02）
 
 結論：
   ✓ 三段都通（primary=CISPrimaryDB）。
@@ -328,7 +334,8 @@ node vitals.js --check-patients
 | 1 全部 ✗ | 連錯資料庫或沒權限 | 照上表指定 `patientDatabase` |
 | 2 是 0 列 | 那台 primary 現在真的沒有在床病人，或床位資料在別的庫 | 用 SSMS 跑一次 `sql/patients.sql` 對照 |
 | 2 有列但 `lifetimeNumber` 空值很多 | 查得到人，但 `Patient.lifetimeNumber` 本來就沒填 | 要改抓別的欄位（病歷號可能在別處） |
-| 3 是 0 床對得上 | 兩邊的 `bedId` 不是同一組值 | 改用別的對應鍵（例如床號 `label`），`patients.sql` 一起調整 |
+| 3 是 0 床對得上 | 兩邊床號的寫法不同（前綴、補零、全形） | 在 `patients.sql` 裡把 `displayLabel` 調成跟 CDS 的 `UdsBed.label` 一致 |
+| 2 出現「床號對到多位病人」 | 不同單位有同名的床 | `patients.sql` 再限定 `clinicalUnit` |
 
 正常執行時這些狀況也會出現在主控台，不會默默變成 null：
 
@@ -336,7 +343,7 @@ node vitals.js --check-patients
   ⚠ [primary db1] 查病人資料失敗，病歷號會是 null（儀器資料照常輸出）
       ICCA_DB01：Invalid object name 'dbo.PtLocationStay'.
       診斷：node vitals.js --check-patients
-  ⚠ [cds1] 一床都對不上——CDS 的 bedId 例：7001, 7002；primary 的 bedId 例：101, 102
+  ⚠ [cds1] 一床都對不上——CDS 的床號例：ICU-01, ICU-99；primary 的床號例：6F-ICU-01, 6F-ICU-02
 ```
 
 primary 是誰？跟 `--discover` 同一套：站台的 `primary`，沒有的話用 `vitals.defaultPrimary`，

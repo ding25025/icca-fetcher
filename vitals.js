@@ -9,9 +9,10 @@
  *   其餘                            → primary，查病人（與 --discover 的 parameterId）用
  * 連線資訊（IP / 帳密）不必再抄一份到別的檔案。
  *
- * CDS 只有床與儀器，病人在 primary。兩邊共同的鑰匙是 bedId，所以每次執行會順便連
- * primary 跑 sql/patients.sql，把病歷號（lifetimeNumber）、住院帳號（encounterNumber）
- * 與 ptEncounterId 併進每一筆。bedId 本身只是鑰匙，不會出現在輸出裡。
+ * CDS 只有床與儀器，病人在 primary。兩邊共同的鑰匙是床號（CDS 的 UdsBed.label 對
+ * primary 的 Bed.displayLabel），所以每次執行會順便連 primary 跑 sql/patients.sql，
+ * 把病歷號（lifetimeNumber）、住院帳號（encounterNumber）與 ptEncounterId 併進每一筆。
+ * 床號比對前會去空白、轉大寫，兩邊大小寫不一致也接得起來。
  * primary 出問題時只警告，儀器資料照樣輸出（病人欄位留 null）；--no-patients 可整個關掉。
  *
  * 重點：不要查 dbo.UnvalidatedDevicePeriodicData 這個 view。
@@ -104,12 +105,13 @@ parameterId 來源優先序：
   --discover 會蓋掉以上全部。實際採用哪個來源會印在執行訊息裡。
 
 病人資料：
-  預設會連 primary 跑 sql/patients.sql，用 bedId 把病歷號（lifetimeNumber）、
-  住院帳號（encounterNumber）與 ptEncounterId 併進每一筆。bedId 只是鑰匙，不輸出。
+  預設會連 primary 跑 sql/patients.sql，用「床號」把病歷號（lifetimeNumber）、
+  住院帳號（encounterNumber）與 ptEncounterId 併進每一筆。床號是 CDS 的 UdsBed.label 對 primary 的
+  Bed.displayLabel，比對前會去空白、轉大寫。
   primary 查不到或連不上時仍會輸出儀器資料，病人欄位留 null。
   要連哪個資料庫：--patients-db > vitals.patientDatabase > SQL 檔裡的 USE > primary 的設定。
   病歷號整排 null 時跑 --check-patients，它會指出是連錯資料庫、沒有在床病人、
-  還是兩邊的 bedId 不是同一組值。
+  還是兩邊的床號寫法不一樣。
 `);
 }
 
@@ -135,7 +137,7 @@ const DEFAULTS = {
   parameterIdsFile: 'sql/parameter-ids.txt',
   parameterSqlFile: 'sql/parameters.sql',
   discoverParameters: false,
-  // 病人資料（primary）：用 bedId 把病歷號接到儀器資料上
+  // 病人資料（primary）：用床號把病歷號接到儀器資料上
   includePatients: true,
   patientSqlFile: 'sql/patients.sql',
   // 沒指定 patientDatabase、SQL 檔也沒寫 USE 時，最後再試這些常見名稱。
@@ -445,32 +447,53 @@ function databaseFromSql(sqlText) {
 }
 
 /**
- * 把查回來的列變成 Map<bedId, { lifetimeNumber, encounterNumber, ptEncounterId }>。
- * bedId 兩邊同一組值（primary 的 PtLocationStay.bedId、CDS 的 UdsBed.bedId），
- * 是唯一能把儀器資料接到病人身上的鑰匙。
+ * 床號正規化。兩邊的床號是各自維護的字串（primary 的 Bed.displayLabel、
+ * CDS 的 UdsBed.label），大小寫或前後空白不一樣就會對不上，所以比對前統一：
+ * 去頭尾空白、內部連續空白縮成一個、轉大寫。全形空白也一併處理。
+ */
+function normBed(v) {
+  return String(v == null ? '' : v)
+    .replace(/[\s　]+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+/**
+ * 把查回來的列變成 Map<床號, { lifetimeNumber, encounterNumber, ptEncounterId }>。
+ *
+ * 鑰匙是床號：primary 的 Bed.displayLabel 對 CDS 的 UdsBed.label。
+ * 欄名就照 patients.sql 的 bed / lifetimeNumber / encounterNumber / ptEncounterId。
+ *
+ * 回傳 { byBed, duplicates }。床號不像 bedId 保證唯一——不同單位可能有同名的床，
+ * 撞在一起會把病歷號接到別人身上，所以重複的要回報出來，不能默默吃掉。
  */
 function indexPatientsByBed(rows) {
   const byBed = new Map();
+  const duplicates = new Set();
   for (const row of rows || []) {
-    if (row.bedId == null) continue;
-    const key = String(row.bedId).trim();
-    // 同一張床理論上只會有一位線上病人。真的重複時不要讓沒有病歷號的那筆蓋掉有的，
-    // 否則欄位明明查得到卻是 null。
-    const prev = byBed.get(key);
-    if (prev && (prev.lifetimeNumber != null || row.lifetimeNumber == null)) continue;
-    byBed.set(key, {
+    const key = normBed(row.bed);
+    if (!key) continue;
+    const rec = {
       lifetimeNumber: row.lifetimeNumber != null ? row.lifetimeNumber : null,
       encounterNumber: row.encounterNumber != null ? row.encounterNumber : null,
       ptEncounterId: row.ptEncounterId != null ? row.ptEncounterId : null,
-    });
+    };
+    const prev = byBed.get(key);
+    if (prev) {
+      // 同一個床號兩位病人＝真的撞號（或 SQL 沒濾乾淨），記下來給呼叫端警告
+      if (prev.lifetimeNumber !== rec.lifetimeNumber) duplicates.add(key);
+      // 沒有病歷號的那筆不要蓋掉有的，否則欄位明明查得到卻是 null
+      if (prev.lifetimeNumber != null || rec.lifetimeNumber == null) continue;
+    }
+    byBed.set(key, rec);
   }
-  return byBed;
+  return { byBed, duplicates: [...duplicates] };
 }
 
-/** 給測試與外部呼叫用：連線跑一次 SQL 再索引起來 */
+/** 給測試與外部呼叫用：連線跑一次 SQL 再索引起來（只回 Map） */
 async function fetchPatients(pool, sqlText) {
   const r = await pool.request().query(stripBatchDirectives(sqlText));
-  return indexPatientsByBed(r.recordset || []);
+  return indexPatientsByBed(r.recordset || []).byBed;
 }
 
 /**
@@ -563,7 +586,7 @@ async function loadPatients(site, settings, args, registry, siteName, timeout) {
       return null;
     }
 
-    const byBed = indexPatientsByBed(rows);
+    const { byBed, duplicates } = indexPatientsByBed(rows);
     const noMrn = [...byBed.values()].filter((p) => p.lifetimeNumber == null).length;
     console.log(
       `  [primary ${q.key}→${database}] 線上病人：${byBed.size} 床` +
@@ -572,6 +595,14 @@ async function loadPatients(site, settings, args, registry, siteName, timeout) {
     );
     if (!byBed.size) {
       console.warn(`  ⚠ ${database} 查得到但沒有任何在床病人，病歷號會是 null。用 --check-patients 看細節`);
+    }
+    // 床號不像 bedId 保證唯一，撞號會把病歷號接到別人身上，一定要講出來
+    if (duplicates.length) {
+      console.warn(
+        `  ⚠ [primary ${q.key}] 有 ${duplicates.length} 個床號對到多位病人：${duplicates.slice(0, 5).join(', ')}` +
+          (duplicates.length > 5 ? ' …' : '') +
+          `\n      這些床只會接到其中一位，patients.sql 需要再限定單位（clinicalUnit）`
+      );
     }
     return byBed;
   });
@@ -582,7 +613,7 @@ async function loadPatients(site, settings, args, registry, siteName, timeout) {
  * 病歷號整排 null 有三種完全不同的成因，靠正常執行的訊息分不出來：
  *   1. primary 連錯資料庫 → 找不到 dbo.PtLocationStay，查詢整個失敗
  *   2. 查得到但沒有在床病人 → 0 列
- *   3. 查得到、也有病人，但 bedId 跟 CDS 不是同一組值 → 對不起來
+ *   3. 查得到、也有病人，但床號跟 CDS 的寫法不一樣 → 對不起來
  * 這裡把三段各自跑一次並印出實際數字與樣本，直接指出是哪一種。只讀資料，不寫任何東西。
  */
 async function checkPatients(sites, settings, args, registry) {
@@ -610,25 +641,32 @@ async function checkPatients(sites, settings, args, registry) {
   console.log(`   ✓ ${usedDb}：查詢成功，${rows.length} 列`);
 
   // --- 2. 查回來的內容 ---
-  const patients = indexPatientsByBed(rows);
+  const { byBed: patients, duplicates } = indexPatientsByBed(rows);
   const sample = rows.slice(0, 3);
   const vals = [...patients.values()];
   const nulls = (k) => vals.filter((v) => v[k] == null).length;
-  console.log(`\n2. 查回來的病人：${patients.size} 個不同的 bedId`);
+  console.log(`\n2. 查回來的病人：${patients.size} 個不同的床號`);
   if (!patients.size) {
-    console.log(`   ⚠ 一列都沒有。SQL 的條件是 endDate IS NULL AND bedId IS NOT NULL，`);
+    console.log(`   ⚠ 一列都沒有（或每一列的床號都是空的）。SQL 的條件是 endDate IS NULL，`);
     console.log(`     這台 primary 現在可能真的沒有在床病人，或者床位資料在另一個資料庫。`);
     return;
   }
   console.log(`   空值：lifetimeNumber ${nulls('lifetimeNumber')} / encounterNumber ${nulls('encounterNumber')} / ptEncounterId ${nulls('ptEncounterId')}（共 ${patients.size}）`);
+  if (duplicates.length) {
+    console.log(`   ⚠ 有 ${duplicates.length} 個床號對到多位病人：${duplicates.slice(0, 5).join(', ')}`);
+    console.log(`     床號不像 bedId 保證唯一，這些床會接到其中一位，patients.sql 需要再限定單位`);
+  }
   console.log(`   前幾列：`);
   for (const row of sample) {
-    console.log(`     bedId=${row.bedId}  lifetimeNumber=${row.lifetimeNumber}  encounterNumber=${row.encounterNumber}  ptEncounterId=${row.ptEncounterId}`);
+    console.log(
+      `     bed=${row.bed}  lifetimeNumber=${row.lifetimeNumber}` +
+        `  encounterNumber=${row.encounterNumber}  ptEncounterId=${row.ptEncounterId}`
+    );
   }
   const ptKeys = [...patients.keys()];
 
-  // --- 3. 跟各站 CDS 的 bedId 對一次 ---
-  console.log(`\n3. 跟 CDS 的 bedId 對照（UdsBed）`);
+  // --- 3. 跟各站 CDS 的床號對一次 ---
+  console.log(`\n3. 跟 CDS 的床號對照（UdsBed.label 對 Bed.displayLabel）`);
   let anyMatch = 0;
   for (const site of sites) {
     const conn = resolveConn(site.cds, registry, 'cds', site.name);
@@ -636,17 +674,17 @@ async function checkPatients(sites, settings, args, registry) {
     try {
       pool = await connect(conn, timeout);
       const r = await pool.request().query(
-        'SET LOCK_TIMEOUT 3000; SELECT bedId, label FROM dbo.UdsBed WITH (NOLOCK)'
+        'SET LOCK_TIMEOUT 3000; SELECT label FROM dbo.UdsBed WITH (NOLOCK)'
       );
-      const beds = (r.recordset || []).map((b) => ({ id: String(b.bedId).trim(), label: b.label }));
-      const hit = beds.filter((b) => patients.has(b.id));
+      const beds = (r.recordset || []).map((b) => b.label);
+      const hit = beds.filter((label) => patients.has(normBed(label)));
       anyMatch += hit.length;
       console.log(
         `   ${site.name}：UdsBed ${beds.length} 床，其中 ${hit.length} 床對得上 primary` +
-          (hit.length ? `（例：${hit.slice(0, 3).map((b) => `${b.id}=${b.label}`).join('、')}）` : '')
+          (hit.length ? `（例：${hit.slice(0, 3).join('、')}）` : '')
       );
       if (!hit.length && beds.length) {
-        console.log(`     CDS 的 bedId 例：${beds.slice(0, 5).map((b) => b.id).join(', ')}`);
+        console.log(`     CDS 的床號例：${beds.slice(0, 5).join(', ')}`);
       }
     } catch (e) {
       console.log(`   ${site.name}：✗ ${e.message}`);
@@ -660,9 +698,10 @@ async function checkPatients(sites, settings, args, registry) {
     console.log(`  ✓ 三段都通（primary=${usedDb}）。正常執行就會帶出病歷號；`);
     console.log(`    把 "patientDatabase": "${usedDb}" 寫進 databases.config.json 的 vitals 區塊可以省掉試連。`);
   } else {
-    console.log(`  ✗ primary 查得到病人，但沒有任何一床的 bedId 對得上 CDS。`);
-    console.log(`    primary 的 bedId 例：${ptKeys.slice(0, 5).join(', ')}`);
-    console.log(`    兩邊如果是不同組編號，就要換一個對應鍵（例如改用床號 label），把 patients.sql 一起調整。`);
+    console.log(`  ✗ primary 查得到病人，但沒有任何一床的床號對得上 CDS。`);
+    console.log(`    primary 的床號例：${ptKeys.slice(0, 5).join(', ')}`);
+    console.log(`    比對前已經去空白、轉大寫，還是對不上就是寫法本身不同（前綴、補零、全形），`);
+    console.log(`    要在 patients.sql 裡把 displayLabel 調成跟 CDS 的 UdsBed.label 一致。`);
   }
 }
 
@@ -754,8 +793,8 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
   const req = pool.request().input('win', sql.Int, windowMinutes);
   parameterIds.forEach((v, i) => req.input(`p${i}`, sql.Int, v));
 
-  // bedId 是拿來接 primary 病人資料的鑰匙，合併完就從輸出裡拿掉
-  const COLS = 'bedId, bed, parameterId, numericValue, textValue, units, measurementTime, storeTime';
+  // bed（UdsBed.label）就是接 primary 病人資料的鑰匙，本來就要輸出，不必再多撈 bedId
+  const COLS = 'bed, parameterId, numericValue, textValue, units, measurementTime, storeTime';
 
   // 每床每分鐘每個參數只留最新一筆。監視器可能每幾秒送一次，降頻後資料量差很多。
   // 在 SQL 端做掉，網路傳輸與 JSON 大小一起省；要原始逐筆就關掉 perMinute。
@@ -771,7 +810,6 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
 
   const inner = `
 SELECT
-    b.bedId,
     b.label            AS bed,
     p.parameterId,
     p.numericValue,
@@ -934,7 +972,7 @@ async function runSite(site, settings, args, registry, anchors) {
   if (!parameterIds.length) throw new Error(`站台 ${name} 沒有任何 parameterId 可撈`);
   console.log(`  [${name}] parameterId：${parameterIds.length} 個（來源：${source}）`);
 
-  // 1.5 病人資料先發出去，跟 CDS 的查詢並行跑，最後再用 bedId 併起來。
+  // 1.5 病人資料先發出去，跟 CDS 的查詢並行跑，最後再用床號併起來。
   //     這裡刻意不 await，不然 primary 慢的時候會白等。
   const wantPatients = !args.noPatients && settings.includePatients !== false;
   const patientsPromise = wantPatients
@@ -1001,15 +1039,13 @@ async function runSite(site, settings, args, registry, anchors) {
     const patients = await patientsPromise;
     let unmatched = 0;
     const matchedBeds = new Set();
-    const rowBedIds = rows.map((r) => String(r.bedId).trim());
 
     const offset = settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8;
     rows = rows.map((r) => {
-      // bedId 只是接 primary 的鑰匙，不放進輸出
-      const { bedId, ...rest } = r;
-      const pt = patients ? patients.get(String(bedId).trim()) : null;
+      // 用床號對 primary：CDS 的 UdsBed.label 對 Bed.displayLabel（bed 本身照樣輸出）
+      const pt = patients ? patients.get(normBed(r.bed)) : null;
       if (patients) {
-        if (pt) matchedBeds.add(String(bedId));
+        if (pt) matchedBeds.add(normBed(r.bed));
         else unmatched++;
       }
       // terseLabel 是臨床項目（HR、ABP、體溫…），propName 是細項（systolic/diastolic/mean）
@@ -1026,7 +1062,7 @@ async function runSite(site, settings, args, registry, anchors) {
           : {}),
         terseLabel: labels[r.parameterId] || null,
         propName: props[r.parameterId] || null,
-        ...rest,
+        ...r,
       };
       // 預設把時間換算成本地時區；--utc 則保留 DB 原始的 UTC 值
       return args.utc || settings.timesInUtc ? base : shiftTimes(base, offset);
@@ -1037,14 +1073,14 @@ async function runSite(site, settings, args, registry, anchors) {
         `  [${name}] 病人對應：${matchedBeds.size} 床接上病歷號` +
           (unmatched ? `，${unmatched} 筆的床在 primary 查不到線上病人` : '')
       );
-      // 一床都對不上通常不是「病人沒躺床」，是兩邊的 bedId 根本不是同一組值。
+      // 一床都對不上通常不是「病人沒躺床」，是兩邊床號的寫法不一樣（前綴、補零、全形）。
       // 把雙方的樣本印出來，一眼就看得出來。
       if (!matchedBeds.size && patients.size) {
-        const cdsSample = [...new Set(rowBedIds)].slice(0, 5).join(', ');
+        const cdsSample = [...new Set(rows.map((r) => r.bed))].slice(0, 5).join(', ');
         const ptSample = [...patients.keys()].slice(0, 5).join(', ');
         console.warn(
-          `  ⚠ [${name}] 一床都對不上——CDS 的 bedId 例：${cdsSample}；primary 的 bedId 例：${ptSample}\n` +
-            `      兩邊不是同一組值的話要改對應鍵，先跑 node vitals.js --check-patients`
+          `  ⚠ [${name}] 一床都對不上——CDS 的床號例：${cdsSample}；primary 的床號例：${ptSample}\n` +
+            `      兩邊寫法不同的話要調整 patients.sql，先跑 node vitals.js --check-patients`
         );
       }
     }
@@ -1162,7 +1198,7 @@ async function main() {
         const pc = resolveConn(primaryRef, registry, 'primary', 'primary');
         const ptSql = fs.readFileSync(path.resolve(process.cwd(), ptFile), 'utf8');
         const cands = patientDatabaseCandidates(ptSql, pc, {}, settings, args.patientDb);
-        console.log(`\n病人資料：${ptFile} → primary ${primaryRef}（${pc.server}:${pc.port || 1433}），用 bedId 對應`);
+        console.log(`\n病人資料：${ptFile} → primary ${primaryRef}（${pc.server}:${pc.port || 1433}），用床號對應`);
         console.log(
           `          資料庫：${cands.join(' → ')}` +
             (cands.length > 1 ? '（依序試，第一個成功的採用；--check-patients 可先確認）' : '')
