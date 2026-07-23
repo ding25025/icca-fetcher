@@ -162,14 +162,31 @@ node vitals.js --help                   # 全部選項
 （每張表一個 `MAX`，走索引）換掉一次 26 張表的全域掃描。跨小時交界時會自動多帶前一張，
 所以 11:02 撈近 5 分鐘不會漏掉 10:57~11:00 那幾筆。
 
+## 兩張表：週期性 ＋ 非週期性
+
+生命徵象散在 CDS 的兩張表，`vitals.js` 兩張都撈，併成同一個陣列輸出：
+
+| 表 | 內容 | 怎麼查 |
+|---|---|---|
+| `UnvalidatedDevicePeriodicData_00..25` | 監視器持續送的（HR、SpO2、動脈壓…） | 26 張環狀表，先定位寫入頭只查那一張 |
+| `UnvalidatedDeviceAperiodicData` | 間歇量測（NBP 這類，可能 15 分鐘才一筆） | 不是環狀表，就一張，直接照時間窗撈 |
+
+兩邊欄位名稱完全一樣（`bed` / `parameterId` / `numericValue` / `textValue` / `units` /
+`measurementTime` / `storeTime`），所以下游（病人對應、時區換算、輸出格式）完全共用，
+要分辨來源看 `_sourceTable` 就好。
+
+非週期性資料**不降頻**——本來就稀疏，每一筆都要留（週期性資料預設每床每分鐘每參數只留最新一筆）。
+這一段失敗只警告，週期性資料照樣輸出；`--no-aperiodic` 可以整個關掉。
+
 ## 執行
 
 ```bash
-node vitals.js --pretty          # 七台 CDS 平行，近 5 分鐘
+node vitals.js --pretty          # 七台 CDS 平行，近 5 分鐘（兩張表都撈）
 node vitals.js -w 15             # 改抓近 15 分鐘
 node vitals.js --site cds1,cds2  # 只跑指定站台
 node vitals.js --utc             # 時間保留 DB 原始的 UTC
 node vitals.js --no-patients     # 不去 primary 查病人（輸出就沒有病歷號）
+node vitals.js --no-aperiodic    # 只撈週期性資料
 node vitals.js --discover        # parameterId 改由 primary 動態查
 ```
 
@@ -179,6 +196,7 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
   [cds1] parameterId：48 個（來源：sql/parameter-ids.txt）
   [primary db1] 線上病人：38 床（sql/patients.sql）
   [cds1] head=UnvalidatedDevicePeriodicData_19（2026-07-22 03:24:00 UTC），近 5 分鐘需查 1 張表：..._19
+  [cds1] 非週期性（UnvalidatedDeviceAperiodicData）：18 筆
   [cds1] 病人對應：12 床接上病歷號
   [cds2] head=UnvalidatedDevicePeriodicData_07（2026-07-22 03:24:00 UTC），近 5 分鐘需查 2 張表：..._07, ..._06
   ✓ cds1：284 筆（UnvalidatedDevicePeriodicData_19）

@@ -49,6 +49,7 @@ function parseArgs(argv) {
     if (t === '--config' || t === '-c') a.config = argv[++i];
     else if (t === '--no-patients') a.noPatients = true;
     else if (t === '--keep-unmatched') a.keepUnmatched = true;
+    else if (t === '--no-aperiodic') a.noAperiodic = true;
     else if (t === '--patients-sql') a.patientSqlFile = argv[++i];
     else if (t === '--patients-db') a.patientDb = argv[++i];
     else if (t === '--check-patients') a.checkPatients = true;
@@ -86,6 +87,7 @@ function printHelp() {
       --discover        先連 primary 查出 parameterId 清單（跑 sql/parameters.sql）
       --utc             時間保留 DB 原始的 UTC 值（預設已換算成本地 +8）
       --all-rows        不降頻，每筆都撈（預設每床每分鐘每參數只留最新一筆）
+      --no-aperiodic    只撈週期性資料，不撈 NBP 這類間歇量測
       --no-patients     不去 primary 查病人，輸出就不會有病歷號
       --keep-unmatched  連沒對到病人的床也輸出（預設只留對得到病人的）
       --patients-sql <檔案>  換一份查病人的 SQL（預設 sql/patients.sql）
@@ -146,6 +148,12 @@ const DEFAULTS = {
   // 只輸出對得到病人的床；設 false（或 --keep-unmatched）則空床的資料也一起輸出。
   // primary 查失敗時一律不濾，否則會產出空檔案。
   onlyMatchedBeds: true,
+  // 非週期性資料（NBP 這類間歇量測）。不是環狀表，單純一張，直接照時間窗撈。
+  // 欄位與週期表一樣，撈回來併進同一個陣列。
+  aperiodic: {
+    enabled: true,
+    table: 'UnvalidatedDeviceAperiodicData',
+  },
   patientSqlFile: 'sql/patients.sql',
   // 沒指定 patientDatabase、SQL 檔也沒寫 USE 時，最後再試這些常見名稱。
   // ICCA 的病人資料慣例上在 CISPrimaryDB，但 databases[] 裡的 primary 常寫成別的用途。
@@ -185,6 +193,8 @@ function loadConfig(configPath) {
 function mergeSettings(cfg) {
   const v = { ...DEFAULTS, ...(cfg.vitals || {}) };
   v.ring = { ...DEFAULTS.ring, ...((cfg.vitals || {}).ring || {}) };
+  // 巢狀區塊要逐層疊，否則只寫其中一個鍵會把其餘預設值蓋掉
+  v.aperiodic = { ...DEFAULTS.aperiodic, ...((cfg.vitals || {}).aperiodic || {}) };
   return v;
 }
 
@@ -851,6 +861,23 @@ ${body}`;
   return (r.recordset || []).map((row) => ({ _sourceTable: t, ...row }));
 }
 
+// ---------- 非週期性資料（UnvalidatedDeviceAperiodicData）----------
+/**
+ * NBP、心輸出量這類「間歇量測」不在週期表裡，是另外一張非週期表。
+ *
+ * 它不是環狀表，就單純一張，所以不必定位寫入頭，直接照時間窗撈即可。
+ * 欄位名稱與週期表完全一樣（bed / parameterId / numericValue / textValue / units /
+ * measurementTime / storeTime），所以直接沿用 fetchVitals，撈回來併進同一個陣列，
+ * 下游（病人對應、時區換算、輸出）完全共用。
+ *
+ * 唯一的差別是不降頻：這種資料本來就稀疏（NBP 可能 15 分鐘才一筆），每一筆都要留。
+ */
+async function collectAperiodic(pool, { table, parameterIds, windowMinutes, settings, name }) {
+  const rows = await fetchVitals(pool, table, parameterIds, windowMinutes, { ...settings, perMinute: false });
+  console.log(`  [${name}] 非週期性（${table}）：${rows.length} 筆`);
+  return rows;
+}
+
 /**
  * 跨表去重。
  *
@@ -1041,6 +1068,28 @@ async function runSite(site, settings, args, registry, anchors) {
         console.log(`  [${name}] 跨表去重：${beforeDedupe} → ${rows.length} 筆`);
       }
     }
+    const periodicCount = rows.length;
+
+    // 3.5 非週期性資料（NBP 這類間歇量測）併進同一個陣列。
+    // 欄位名稱與週期表一樣，所以下游（病人對應、時區換算、輸出）完全共用。
+    // 這一段失敗只警告：週期性資料才是主體，不該被它拖垮整站。
+    const apCfg = { ...(settings.aperiodic || {}), ...(site.aperiodic || {}) };
+    let aperiodicCount = 0;
+    if (apCfg.enabled !== false && !args.noAperiodic) {
+      try {
+        const got = await collectAperiodic(pool, {
+          table: apCfg.table || DEFAULTS.aperiodic.table,
+          parameterIds,
+          windowMinutes,
+          settings,
+          name,
+        });
+        aperiodicCount = got.length;
+        rows.push(...got);
+      } catch (e) {
+        console.warn(`  ⚠ [${name}] 非週期性資料撈取失敗：${e.message}（週期性資料照常輸出）`);
+      }
+    }
 
     // 4. 併上病人資料（primary）＋站台標記＋本地時間
     const patients = await patientsPromise;
@@ -1114,6 +1163,8 @@ async function runSite(site, settings, args, registry, anchors) {
       tablesQueried: targets.map((s) => s.table),
       dbTimeUtc: ring.fmtDb(head.maxTime),
       count: rows.length,
+      periodicRows: periodicCount,
+      aperiodicRows: aperiodicCount,
       patientBeds: patients ? matchedBeds.size : null,
       unmatchedBeds: patients ? unmatchedBeds.size : null,
       droppedRows: patients ? dropped : null,
@@ -1266,6 +1317,8 @@ async function main() {
         tablesQueried: s.value.tablesQueried,
         dbTimeUtc: s.value.dbTimeUtc,
         count: s.value.count,
+        periodicRows: s.value.periodicRows,
+        aperiodicRows: s.value.aperiodicRows,
         patientBeds: s.value.patientBeds,
         unmatchedBeds: s.value.unmatchedBeds,
         droppedRows: s.value.droppedRows,
@@ -1273,7 +1326,9 @@ async function main() {
         fetchMs: s.value.fetchMs,
       });
       console.log(
-        `  ✓ ${name}：${s.value.count} 筆（${s.value.headTable}，掃描 ${s.value.scanMs}ms + 撈取 ${s.value.fetchMs}ms）`
+        `  ✓ ${name}：${s.value.count} 筆` +
+          (s.value.aperiodicRows ? `（含非週期 ${s.value.aperiodicRows} 筆）` : '') +
+          `（${s.value.headTable}，掃描 ${s.value.scanMs}ms + 撈取 ${s.value.fetchMs}ms）`
       );
     } else {
       failures++;

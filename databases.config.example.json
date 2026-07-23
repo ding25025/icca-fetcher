@@ -39,6 +39,8 @@
     "output": "vitals_{ts}.json",
     "windowMinutes": 5,
     "parameterIdsFile": "sql/parameter-ids.txt",
+    "_comment_aperiodic": "非週期性資料（NBP 這類間歇量測）。不是環狀表，單張直接撈，欄位與週期表一樣所以併進同一個陣列。enabled: false 或 --no-aperiodic 可關掉。",
+    "aperiodic": { "enabled": true, "table": "UnvalidatedDeviceAperiodicData" },
     "includePatients": true,
     "patientSqlFile": "sql/patients.sql",
     "_comment_patientDatabase": "病人資料在哪個資料庫。不寫的話會依序試 primary 的 database、再試 CISPrimaryDB；用 node vitals.js --check-patients 可以問出實際是哪一個。",
