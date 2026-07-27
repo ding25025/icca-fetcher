@@ -8,6 +8,7 @@
     "start": "node index.js",
     "start:config": "node index.js --config",
     "vitals": "node vitals.js --pretty",
+    "neuro": "node neuro.js --pretty",
     "ring": "node ring.js --mode head --pretty"
   },
   "dependencies": {
