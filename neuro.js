@@ -10,7 +10,7 @@
  *      interventionId + terseLabel（昏迷指數、瞳孔、肌力…）。等同 vitals 的 --discover。
  *   2. primary：跑 sql/neuro-encounters.sql，列出目前在床病人的 ptEncounterId，以及
  *      每個病人的病歷資料實際落在哪個 charting 資料庫（HostDb 的 dbSqlInstance / dbName），
- *      順便帶病歷號、住院帳號、床號。
+ *      順便帶病歷號、床號。
  *   3. 依 (dbSqlInstance, dbName) 分組，每個 CISChartingDBxxxx 連一次，查
  *      dbo.PtIntervention：interventionId 在清單內、ptEncounterId 在該組內、
  *      且 storeTime 落在近一小時（有異動）。

@@ -1,3 +1,20 @@
+# ICCA 資料抓取工具
+
+從 ICCA 撈資料的幾支 Node.js 工具，設定共用一份 `databases.config.json`。
+
+| 工具 | 撈什麼 | 資料來源 | 備註 |
+|---|---|---|---|
+| [`vitals.js`](vitals.js) | 生命徵象（HR、SpO2、動脈壓、CVP…） | CDS 的 26 張環狀表 ＋ 非週期表 | 實務上主要用的那支 |
+| [`neuro.js`](neuro.js) | 神經評估、RASS、ICDSC、FiO2、PaO2、體溫 | primary ＋ 各 CISChartingDB 分片 | 每小時撈有異動的病歷紀錄 |
+| [`ring.js`](ring.js) | 環狀表定位與原始查詢 | CDS | `vitals.js` 的底層，也能單獨用 |
+| [`server.js`](server.js) | 把 `ring.js` 包成常駐 HTTP 服務 | 同上 | 給 Rhapsody 定時呼叫，另見 [SERVER.md](SERVER.md) |
+| [`index.js`](index.js) | 多資料庫平行跑自訂 SQL | 任意 | 通用底座 |
+
+`vitals.js` 走**儀器資料**（機器自己送的數值），`neuro.js` 走**病歷紀錄**（護理師打進表單的），
+兩者的資料來源與定位方式完全不同，不會互相取代。
+
+---
+
 # 快速開始
 
 在**連得到 ICCA 資料庫的那台機器**上執行。
@@ -368,11 +385,15 @@ primary 是誰？跟 `--discover` 同一套：站台的 `primary`，沒有的話
 
 ## parameterId 從哪來
 
-預設用 `vitals.config.json` 裡的 `parameterIds`（取自 `Vitalsign.sql`）：
+CDS 的資料表只認 `parameterId`（整數），要撈哪些項目就得先有一份 id 清單。
+可以自己在 SSMS 撈好餵進來（預設），也可以讓工具連 primary 動態查——
+兩條路都在下面，同時存在時的優先序見本節最後。
+
+本院目前用到的（完整清單在 [sql/parameter-ids.txt](sql/parameter-ids.txt)）：
 
 ```
-體溫 150344   HR 147842    SpO2 150456   ICP 153611
-CVP 150087    PAP 150045   ABPs 150037   ABPd 150038   ABPm 150039
+HR 147842    SpO2 150456   ICP 153611
+CVP 150087   PAP 150045    ABPs 150037   ABPd 150038   ABPm 150039
 NBP 150021 / 150022 / 150023
 ```
 
@@ -424,14 +445,15 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 ```json
 [
   { "cdsParameterId": -268367660, "terseLabel": "ABP", "propName": "diastolic" },
-  { "cdsParameterId": 150344, "terseLabel": "體溫(˚C)", "propName": "temperature" }
+  { "cdsParameterId": 150456, "terseLabel": "SpO2", "propName": "SpO2msmt" }
 ]
 ```
 
-撈回來的每筆資料會多兩個欄位：
+撈回來的每筆資料會多帶 `terseLabel` 與 `propName` 兩個欄位
+（`parameterId` 本身只在程式內部用，不進輸出）：
 
 ```json
-{ "parameterId": 150034, "terseLabel": "ABP", "propName": "diastolic", ... }
+{ "terseLabel": "ABP", "propName": "diastolic", "bed": "ICU-01", "numericValue": 78, ... }
 ```
 
 `propName` 很重要——`ABP` 底下有 systolic / diastolic / mean 三種，只看 `terseLabel`
@@ -463,6 +485,8 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 > **`體溫(˚C)` 裡的度數符號是 `˚` (U+02DA RING ABOVE)，不是 `°` (U+00B0 DEGREE SIGN)。**
 > 兩者長得幾乎一樣，但 SQL 比對不會相等——打錯的話體溫會安靜地查不到，其它項目照常回傳，
 > 很難發現。要改請直接從 SSMS 複製，不要手打。
+> 體溫現在是由 `neuro.js` 撈的，這條同樣適用於
+> [sql/neuro-interventions.sql](sql/neuro-interventions.sql) 裡的 `terseLabel` 比對。
 
 ## 時區：DB 存的是 UTC
 
@@ -473,6 +497,124 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 機器在哪個時區都不會算錯。輸出的 `measurementTime` / `storeTime` 已經換算成本地時間
 （`2026-07-22 11:24:00`，預設 +8，可用 `displayTimezoneOffsetHours` 調整）；
 要保留 DB 原始的 UTC 值就加 `--utc`。
+
+---
+
+# 神經評估抓取工具（neuro.js）
+
+跟 `vitals.js` 是姊妹功能，但走的是**病歷紀錄**（護理師打進表單的）而非儀器資料，
+管線完全不同。預設每小時跑一次，只撈「近一小時有異動」的紀錄。
+
+## 跟 vitals.js 差在哪
+
+| | `vitals.js` | `neuro.js` |
+|---|---|---|
+| 資料 | 儀器自己送的數值 | 護理師打進表單的紀錄 |
+| 來源表 | CDS 的 `UnvalidatedDevice*Data` | 各 charting 分片的 `PtIntervention` |
+| 怎麼定位 | 26 張環狀表，先找寫入頭 | 照 `HostDb` 分片，不掃表 |
+| 對應鑰匙 | **床號**（`UdsBed.label` 對 `Bed.displayLabel`） | **`ptEncounterId`**（病人主鍵） |
+| 「新資料」的定義 | `measurementTime` 落在時間窗 | `storeTime` 落在時間窗（有異動才撈） |
+| 預設時間窗 | 5 分鐘 | 60 分鐘 |
+
+## 三段查詢
+
+1. **primary**：跑 [sql/neuro-interventions.sql](sql/neuro-interventions.sql)，撈出要追蹤的
+   `interventionId` + `terseLabel`。等同 `vitals.js` 的 `--discover`。
+2. **primary**：跑 [sql/neuro-encounters.sql](sql/neuro-encounters.sql)，列出在床病人的
+   `ptEncounterId`，以及每個人的病歷資料落在哪個 charting 資料庫（`HostDb` 的
+   `dbSqlInstance` / `dbName`），順便帶病歷號與床號。
+3. **各 charting 分片平行查**：依 `(dbSqlInstance, dbName)` 分組，每個 `CISChartingDBxxxx`
+   連一次，查 `dbo.PtIntervention`。某個分片連不上只警告並略過那一組，其餘照常輸出。
+
+charting 分片的連線沿用 primary 的帳密與 `options`，只換 `server` / `database`，
+不必另外設定。
+
+## 撈哪些項目
+
+[sql/neuro-interventions.sql](sql/neuro-interventions.sql) 目前涵蓋六組，
+用 `UNION` 併起來，每組的差別只有「`terseLabel` 清單 ＋ `FSSection` ＋ `Document`」三個條件：
+
+| 組別 | 項目 |
+|---|---|
+| 1 | 神經評估：昏迷指數、睜眼/語言/運動反應、瞳孔大小與對光反應、眼球活動、四肢肌力（共 11 項） |
+| 2 | RASS 鎮靜程度評估表 |
+| 3 | ICDSC 譫妄評估 |
+| 4 | FiO2 |
+| 5 | PaO2 |
+| 6 | 體溫 |
+
+要再加一種，複製一個 `SELECT` 區塊、換掉那三個條件即可。
+`EXISTS` 那段用 `conceptId` 把 intervention 綁回它實際出現的表單區段，
+避免撈到同名但屬於別張表單的項目。
+
+> 體溫本來走 `vitals.js` 的儀器資料，現在改由這裡出，所以
+> [sql/parameter-ids.txt](sql/parameter-ids.txt) 裡的體溫 `parameterId` 已經移除。
+
+## 執行
+
+```bash
+node neuro.js --pretty            # 撈近 60 分鐘有異動的
+node neuro.js -w 120              # 改抓近 120 分鐘
+node neuro.js --utc               # 時間保留 DB 原始的 UTC（預設已 +8）
+node neuro.js --ids-file my.txt   # 用自己的 interventionId 清單，跳過第 1 段查詢
+node neuro.js --primary-db CISPrimaryDB   # 指定 primary 是哪個資料庫
+node neuro.js --dry-run           # 只檢查設定，不連資料庫
+node neuro.js --help              # 全部選項
+```
+
+## 輸出
+
+檔名預設 `neuro_{ts}.json`（到分鐘）。**一位病人一筆**，紀錄收在 `records[]` 裡，
+依床號排序（沒床的排最後）：
+
+```json
+[
+  {
+    "lifetimeNumber": "A123456",
+    "bed": "ICU-01",
+    "records": [
+      {
+        "interventionId": "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+        "terseLabel": "昏迷指數",
+        "terseForm": "E4V5M6",
+        "storeTime": "2026-07-31 11:24:05",
+        "addTime": "2026-07-31 11:24:00",
+        "chartTime": "2026-07-31 11:20:00"
+      }
+    ]
+  }
+]
+```
+
+只有**近期有異動**的病人會出現——這不是在床病人清單。`--with-summary` 會改成
+`{ summary, rows }`，`summary` 記錄每個 charting 分片的成敗與筆數。
+
+| 欄位 | 說明 |
+|---|---|
+| `lifetimeNumber` | 病歷號 |
+| `bed` | 床號 |
+| `terseLabel` | 項目名（昏迷指數、RASS、體溫…），來自第 1 段查詢 |
+| `terseForm` | 實際填的值 |
+| `chartTime` | 臨床上這筆紀錄代表的時間 |
+| `addTime` / `storeTime` | 建立時間 / 寫入時間；`storeTime` 是判斷「有異動」的依據 |
+
+## 設定
+
+沿用 `databases.config.json`，要調整就加一個 `"neuro"` 區塊：
+
+```json
+{
+  "neuro": {
+    "windowMinutes": 60,
+    "output": "neuro_{ts}.json",
+    "encounterChunk": 1000
+  }
+}
+```
+
+`encounterChunk` 是一次 `IN` 幾個 `ptEncounterId`——整個加護病房的病人一次塞進去會超過
+SQL Server 單次請求 2100 個參數的上限，所以切塊查再合併。注意每一塊都要重帶一次完整的
+`interventionId` 清單，兩者相加才是實際的參數量。
 
 ---
 
@@ -819,3 +961,32 @@ DB_PASSWORD='你的密碼' node ring.js --mode head --pretty
 
 `head` 是用**未過濾**的全表 `MAX(measurementTime)` 判斷的。如果先套 `parameterId` 再找 head，
 某些表可能因為沒有該參數而顯示為空、導致環狀位置誤判；先定位 head、再套過濾往回撈才是對的順序。
+
+---
+
+# 常駐 HTTP 服務（server.js）
+
+把 `ring.js` 的邏輯包成一支長駐服務，讓 **Rhapsody** 用 HTTP Client communication point
+定時來撈，不必每次觸發都冷啟動一個 node 行程、重連 26 張表。
+
+```bash
+node server.js          # 預設綁 127.0.0.1:8770
+curl http://127.0.0.1:8770/icca/latest?n=1000
+```
+
+| 路徑 | 說明 |
+|---|---|
+| `/health` | 探活，不碰資料庫 |
+| `/icca/head` | 目前寫入頭是哪一張表 |
+| `/icca/order` | 26 張表由新到舊的順序與各表狀態 |
+| `/icca/latest` | 從 head 跨表撈最新 N 筆（**Rhapsody 定時撈這個**） |
+| `/icca/at` | 某時間點落在哪張表，加 `&fetch=1` 順便撈 |
+
+查詢參數與 `ring.js` 的選項一致（`site`、`n`、`param`、`patient`、`from`、`to`、`at`…）。
+設定沿用 `databases.config.json`；監聽位址、埠、存取金鑰走環境變數
+（`ICCA_HOST` / `ICCA_PORT` / `ICCA_TOKEN`）。
+
+**完整說明——包含用 nssm 註冊成 Windows 服務、Rhapsody route 怎麼接、
+心跳與錯誤處理建議——在 [SERVER.md](SERVER.md)。**
+
+> 預設只綁 `127.0.0.1`。要對外開之前先設 `ICCA_TOKEN`，這支服務沒有其它存取控制。
