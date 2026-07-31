@@ -80,7 +80,7 @@ node vitals.js --pretty
 ```
 從 databases.config.json 認出 7 個 CDS：cds1, ..., cds7　primary：db1
 開始平行查詢 7 個站台...
-  [cds1] parameterId：48 個（來源：sql/parameter-ids.txt）
+  [cds1] parameterId：36 個（來源：sql/parameter-ids.txt）
   [cds1] head=UnvalidatedDevicePeriodicData_19（2026-07-22 03:24:00 UTC），近 5 分鐘需查 1 張表
   ✓ cds1：284 筆
   ...
@@ -172,8 +172,9 @@ node vitals.js --help                   # 全部選項
 | `UnvalidatedDeviceAperiodicData` | 間歇量測（NBP 這類，可能 15 分鐘才一筆） | 不是環狀表，就一張，直接照時間窗撈 |
 
 兩邊欄位名稱完全一樣（`bed` / `parameterId` / `numericValue` / `measurementTime` /
-`storeTime`），所以下游（病人對應、時區換算、輸出格式）完全共用，
-要分辨來源看 `_sourceTable` 就好。
+`storeTime`），所以下游（病人對應、時區換算、輸出格式）完全共用。
+兩張表的資料在輸出裡不做區分（來源表只在程式內部用，不寫進 JSON）；
+要看各站撈了哪些表就加 `--with-summary`。
 
 非週期性資料**不降頻**——本來就稀疏，每一筆都要留（週期性資料預設每床每分鐘每參數只留最新一筆）。
 這一段失敗只警告，週期性資料照樣輸出；`--no-aperiodic` 可以整個關掉。
@@ -193,7 +194,7 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
 ```
 從 databases.config.json 認出 7 個 CDS：cds1, ..., cds7　primary：db1
 開始平行查詢 7 個站台...
-  [cds1] parameterId：48 個（來源：sql/parameter-ids.txt）
+  [cds1] parameterId：36 個（來源：sql/parameter-ids.txt）
   [primary db1] 線上病人：38 床（sql/patients.sql）
   [cds1] head=UnvalidatedDevicePeriodicData_19（2026-07-22 03:24:00 UTC），近 5 分鐘需查 1 張表：..._19
   [cds1] 非週期性（UnvalidatedDeviceAperiodicData）：18 筆
@@ -223,20 +224,16 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
 
 固定檔名要當預設的話，在 `vitals` 區塊寫 `"output": "latest.json"`。
 
-內容是單一 JSON 陣列（與 `index.js` 一致）。`terseLabel` / `propName` 從 parameterId 清單
-帶進來，跟儀器自己的 `label` 並存：
+內容是單一 JSON 陣列（與 `index.js` 一致），每筆只留下游用得到的欄位。
+`terseLabel` / `propName` 從 parameterId 清單帶進來：
 
 ```json
 [
   {
-    "_site": "cds1",
     "lifetimeNumber": "A123456",
-    "encounterNumber": "E20260722001",
     "terseLabel": "ABP",
     "propName": "systolic",
-    "_sourceTable": "UnvalidatedDevicePeriodicData_03",
     "bed": "ICU-01",
-    "parameterId": 150037,
     "numericValue": 118,
     "measurementTime": "2026-07-22 11:24:00",
     "storeTime": "2026-07-22 11:24:05"
@@ -246,11 +243,13 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
 
 | 欄位 | 來源 |
 |---|---|
-| `lifetimeNumber` / `encounterNumber` | primary，用**床號**對上（見下節） |
+| `lifetimeNumber` | primary，用**床號**對上（見下節）。`--no-patients` 時這欄不出現 |
 | `terseLabel` / `propName` | parameterId 清單。`ABP` + `systolic` 才分得出是收縮壓 |
 | `bed` | 床號（`UdsBed.label`），也是接病人資料的鑰匙 |
-| `_site` / `_sourceTable` | 哪一台 CDS、哪一張表（週期環狀表或非週期表） |
 | `measurementTime` / `storeTime` | 已換算成本地時間（+8）；`--utc` 保留 DB 原始 UTC |
+
+站台名、來源表、`parameterId` 與住院帳號都不輸出——只在程式內部用（定位、去重、
+對標籤）。要知道哪一站撈了哪張表就加 `--with-summary`。
 
 加 `--with-summary` 會改成 `{ summary, rows }`，`summary` 記錄每站用了哪張表、DB 當下時間、
 筆數、接上病歷號的床數或錯誤。單站失敗不影響其它站，失敗原因會在 summary 與主控台裡。
@@ -300,9 +299,10 @@ node vitals.js --patients-db CISPrimaryDB   # 指定病人資料在哪個資料�
 node vitals.js --check-patients             # 病歷號是 null 時，一次問出是哪一段斷掉
 ```
 
-換自己的 SQL 時，回傳欄位必須包含 `bed`（床號），`lifetimeNumber` / `encounterNumber`
-有哪個就帶哪個；其它欄位（例如 join 用的 `ptEncounterId`）撈了也不會進輸出。`GO` 只是 SSMS 的分批指令、不是 T-SQL，會自動拿掉，
-從 SSMS 直接貼過來就能用。
+換自己的 SQL 時，回傳欄位必須包含 `bed`（床號）與 `lifetimeNumber`（病歷號，會併進輸出）。
+`encounterNumber` 撈了不會進輸出，但 `--check-patients` 會拿它來對照，建議留著。
+其它欄位（例如 join 用的 `ptEncounterId`）撈了也不會進輸出。`GO` 只是 SSMS 的分批指令、
+不是 T-SQL，會自動拿掉，從 SSMS 直接貼過來就能用。
 
 ### 病人資料在哪個資料庫
 
@@ -380,18 +380,22 @@ NBP 150021 / 150022 / 150023
 
 你在 SSMS 跑完 [sql/parameters.sql](sql/parameters.sql) 之後，把結果存成檔案直接指定即可，
 不必讓工具連 primary。目前預設就是這條路：[sql/parameter-ids.txt](sql/parameter-ids.txt)，
-48 個 id、8 個項目。
+36 個 id、7 個項目（ABP、CVP、HR、ICP、NBP、PAP、SpO2）。
 
 ```
 ABP | diastolic | 150034
 HR  | heartRate | 147842
-體溫(˚C) | temperature | 150344
+SpO2 | SpO2msmt | 150456
 ```
+
+> 體溫不在這份清單裡。它改由 `neuro.js` 從 `PtIntervention` 的圖表資料出
+> （見 [sql/neuro-interventions.sql](sql/neuro-interventions.sql) 組別 6），
+> 不再走儀器資料這條路。
 
 ```bash
 node vitals.js --pretty                             # 用設定檔的 parameterIdsFile
 node vitals.js --params other-list.txt --pretty     # 換一份清單
-node vitals.js --param 147842,150456,150344         # 少量時直接打在命令列
+node vitals.js --param 147842,150456,150037         # 少量時直接打在命令列
 ```
 
 匯出格式**不用整理**，下列都吃得下：
