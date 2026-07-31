@@ -11,7 +11,7 @@
  *
  * CDS 只有床與儀器，病人在 primary。兩邊共同的鑰匙是床號（CDS 的 UdsBed.label 對
  * primary 的 Bed.displayLabel），所以每次執行會順便連 primary 跑 sql/patients.sql，
- * 把病歷號（lifetimeNumber）與住院帳號（encounterNumber）併進每一筆，
+ * 把病歷號（lifetimeNumber）併進每一筆，
  * 沒對到病人的床（空床、測試機）預設不輸出。
  * 床號比對前會去空白、轉大寫，兩邊大小寫不一致也接得起來。
  * primary 出問題時只警告，儀器資料照樣輸出（病人欄位留 null）；--no-patients 可整個關掉。
@@ -110,8 +110,8 @@ parameterId 來源優先序：
   --discover 會蓋掉以上全部。實際採用哪個來源會印在執行訊息裡。
 
 病人資料：
-  預設會連 primary 跑 sql/patients.sql，用「床號」把病歷號（lifetimeNumber）、
-  住院帳號（encounterNumber）併進每一筆，沒對到病人的床不輸出
+  預設會連 primary 跑 sql/patients.sql，用「床號」把病歷號（lifetimeNumber）
+  併進每一筆，沒對到病人的床不輸出
   （要保留就加 --keep-unmatched）。床號是 CDS 的 UdsBed.label 對 primary 的
   Bed.displayLabel，比對前會去空白、轉大寫。
   primary 查不到或連不上時仍會輸出儀器資料，病人欄位留 null。
@@ -1112,20 +1112,17 @@ async function runSite(site, settings, args, registry, anchors) {
     rows = rows.map((r) => {
       // 用床號對 primary：CDS 的 UdsBed.label 對 Bed.displayLabel（bed 本身照樣輸出）
       const pt = patients ? patients.get(normBed(r.bed)) : null;
+      // _sourceTable 與 parameterId 只是內部用的（跨表去重、對 terseLabel），不輸出；
+      // 站台名放在 --with-summary 的 summary 裡，不必每一筆都重複一次
+      const { _sourceTable, parameterId, ...rest } = r;
       // terseLabel 是臨床項目（HR、ABP、體溫…），propName 是細項（systolic/diastolic/mean）
       // 兩者來自 parameterId 清單，欄名沿用 CdsParameterMap 的原始欄名
       const base = {
-        _site: name,
-        // 有要查病人才放這兩欄；--no-patients 時整組不出現，不留一排 null
-        ...(wantPatients
-          ? {
-              lifetimeNumber: pt ? pt.lifetimeNumber : null, // 病歷號
-              encounterNumber: pt ? pt.encounterNumber : null, // 住院帳號
-            }
-          : {}),
-        terseLabel: labels[r.parameterId] || null,
-        propName: props[r.parameterId] || null,
-        ...r,
+        // 有要查病人才放病歷號；--no-patients 時不出現，不留一排 null
+        ...(wantPatients ? { lifetimeNumber: pt ? pt.lifetimeNumber : null } : {}), // 病歷號
+        terseLabel: labels[parameterId] || null,
+        propName: props[parameterId] || null,
+        ...rest,
       };
       // 預設把時間換算成本地時區；--utc 則保留 DB 原始的 UTC 值
       return args.utc || settings.timesInUtc ? base : shiftTimes(base, offset);
@@ -1331,7 +1328,8 @@ async function main() {
     }
   });
 
-  // 預設輸出單一 JSON 陣列（與 index.js 一致），每筆自帶 _site / _sourceTable。
+  // 預設輸出單一 JSON 陣列（與 index.js 一致）。每一筆只留下游用得到的欄位，
+  // 站台 / 來源表 / parameterId 這些內部資訊不輸出。
   // 需要各站狀態時加 --with-summary，會包成 { summary, rows }。
   const withSummary = args.withSummary || settings.includeSummary === true;
   saveAnchors(settings.anchorCacheFile, anchors);
