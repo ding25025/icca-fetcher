@@ -101,7 +101,7 @@ node vitals.js --pretty
   [cds1] head=UnvalidatedDevicePeriodicData_19（2026-07-22 03:24:00 UTC），近 5 分鐘需查 1 張表
   ✓ cds1：284 筆
   ...
-合併總筆數：1820
+合併總筆數：1820 筆，38 床
 已輸出：C:\...\vitals_202607231111.json
 ```
 
@@ -181,7 +181,7 @@ node vitals.js --help                   # 全部選項
 
 ## 兩張表：週期性 ＋ 非週期性
 
-生命徵象散在 CDS 的兩張表，`vitals.js` 兩張都撈，併成同一個陣列輸出：
+生命徵象散在 CDS 的兩張表，`vitals.js` 兩張都撈，併進同一份輸出：
 
 | 表 | 內容 | 怎麼查 |
 |---|---|---|
@@ -221,7 +221,7 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
   ✓ cds2：196 筆（UnvalidatedDevicePeriodicData_07）
   ...
 ----------------------------------------
-合併總筆數：1820
+合併總筆數：1820 筆，38 床
 ```
 
 密碼跟著 `databases.config.json` 走。想改用環境變數就把該欄位寫成 `"env:ICCA_PASSWORD"`，
@@ -241,29 +241,40 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
 
 固定檔名要當預設的話，在 `vitals` 區塊寫 `"output": "latest.json"`。
 
-內容是單一 JSON 陣列（與 `index.js` 一致），每筆只留下游用得到的欄位。
-`terseLabel` / `propName` 從 parameterId 清單帶進來：
+內容是單一 JSON 陣列，**一床一筆**——床號與病歷號在外層，量測值收在 `records[]` 裡，
+不必每一筆都重複一次床號。跟 [`neuro.js`](neuro.js) 的輸出同一個形狀：
 
 ```json
 [
   {
-    "lifetimeNumber": "A123456",
-    "terseLabel": "ABP",
-    "propName": "systolic",
     "bed": "ICU-01",
-    "numericValue": 118,
-    "measurementTime": "2026-07-22 11:24:00",
-    "storeTime": "2026-07-22 11:24:05"
+    "lifetimeNumber": "A123456",
+    "records": [
+      {
+        "terseLabel": "ABP",
+        "propName": "systolic",
+        "numericValue": 118,
+        "measurementTime": "2026-07-22 11:24:00",
+        "storeTime": "2026-07-22 11:24:05"
+      }
+    ]
   }
 ]
 ```
 
 | 欄位 | 來源 |
 |---|---|
+| `bed` | 床號（`UdsBed.label`），也是分組的鍵與接病人資料的鑰匙 |
 | `lifetimeNumber` | primary，用**床號**對上（見下節）。`--no-patients` 時這欄不出現 |
 | `terseLabel` / `propName` | parameterId 清單。`ABP` + `systolic` 才分得出是收縮壓 |
-| `bed` | 床號（`UdsBed.label`），也是接病人資料的鑰匙 |
 | `measurementTime` / `storeTime` | 已換算成本地時間（+8）；`--utc` 保留 DB 原始 UTC |
+
+分組的鍵是**床號不是病歷號**：`--no-patients` 時沒有病歷號，primary 連不上時病歷號會整排
+是 null（這時刻意不濾掉，不然一次故障就變成空檔案），用病歷號當鍵這兩種情況都會把不同的床
+塌成同一組。床號則永遠成立。
+
+排序是**自然排序**——`ICU-10` 排在 `ICU-2` 後面，不是字典序；沒床的排最後。
+週期性與非週期性的資料會落在同一床的 `records[]` 裡，不另外區分。
 
 站台名、來源表、`parameterId` 與住院帳號都不輸出——只在程式內部用（定位、去重、
 對標籤）。要知道哪一站撈了哪張表就加 `--with-summary`。
@@ -565,7 +576,7 @@ node neuro.js --help              # 全部選項
 ## 輸出
 
 檔名預設 `neuro_{ts}.json`（到分鐘）。**一位病人一筆**，紀錄收在 `records[]` 裡，
-依床號排序（沒床的排最後）：
+依床號自然排序（`ICU-10` 在 `ICU-2` 之後，沒床的排最後）：
 
 ```json
 [

@@ -11,10 +11,13 @@
  *
  * CDS 只有床與儀器，病人在 primary。兩邊共同的鑰匙是床號（CDS 的 UdsBed.label 對
  * primary 的 Bed.displayLabel），所以每次執行會順便連 primary 跑 sql/patients.sql，
- * 把病歷號（lifetimeNumber）併進每一筆，
+ * 把病歷號（lifetimeNumber）接到床上，
  * 沒對到病人的床（空床、測試機）預設不輸出。
  * 床號比對前會去空白、轉大寫，兩邊大小寫不一致也接得起來。
  * primary 出問題時只警告，儀器資料照樣輸出（病人欄位留 null）；--no-patients 可整個關掉。
+ *
+ * 輸出是「一床一筆」：床號與病歷號在外層，量測值收在 records[]，依床號自然排序
+ * （ICU-10 排在 ICU-2 後面）。跨站合併之後才分組，跟 neuro.js 同一個形狀。
  *
  * 重點：不要查 dbo.UnvalidatedDevicePeriodicData 這個 view。
  *   view 是 26 張表的 UNION，撈近 5 分鐘的資料也得掃過全部 26 張。
@@ -109,9 +112,13 @@ parameterId 來源優先序：
   --param  >  --params / parameterIdsFile  >  站台 parameterIds  >  vitals.parameterIds
   --discover 會蓋掉以上全部。實際採用哪個來源會印在執行訊息裡。
 
+輸出：
+  一床一筆 → { bed, lifetimeNumber, records: [...] }，依床號自然排序（沒床的排最後）。
+  量測值收在 records[] 裡，床號與病歷號不重複。跟 neuro.js 同一個形狀。
+
 病人資料：
   預設會連 primary 跑 sql/patients.sql，用「床號」把病歷號（lifetimeNumber）
-  併進每一筆，沒對到病人的床不輸出
+  接到床上，沒對到病人的床不輸出
   （要保留就加 --keep-unmatched）。床號是 CDS 的 UdsBed.label 對 primary 的
   Bed.displayLabel，比對前會去空白、轉大寫。
   primary 查不到或連不上時仍會輸出儀器資料，病人欄位留 null。
@@ -473,6 +480,54 @@ function normBed(v) {
     .replace(/[\s　]+/g, ' ')
     .trim()
     .toUpperCase();
+}
+
+/**
+ * 床號排序。床號幾乎都是「文字＋數字」混排，純字典序會把 ICU-10 排到 ICU-2 前面，
+ * 所以切成數字 / 非數字段落，數字段落比數值、其餘比字典序。沒床的一律排最後。
+ * neuro.js 也用這一支，兩邊的輸出順序才會一致。
+ */
+const BED_CHUNKS = /\d+|\D+/g;
+function compareBeds(a, b) {
+  const ea = a == null || a === '';
+  const eb = b == null || b === '';
+  if (ea || eb) return ea && eb ? 0 : ea ? 1 : -1;
+
+  const xs = String(a).match(BED_CHUNKS) || [];
+  const ys = String(b).match(BED_CHUNKS) || [];
+  const n = Math.min(xs.length, ys.length);
+  for (let i = 0; i < n; i++) {
+    const x = xs[i];
+    const y = ys[i];
+    const bothNum = /^\d/.test(x) && /^\d/.test(y);
+    const d = bothNum ? Number(x) - Number(y) : x.localeCompare(y);
+    if (d) return d;
+  }
+  // 前面都相同時，段落少的在前（ICU-1 < ICU-1A）；再相同就用原字串定勝負，
+  // 免得 "ICU-01" 與 "ICU-1" 這種寫法不一的比成相等、排序變得不穩定。
+  return xs.length - ys.length || String(a).localeCompare(String(b));
+}
+
+/**
+ * 一床一筆：床號與病歷號提到外層，量測值收進 records[]。
+ * 跨站合併之後才分組，同一張床即使出現在兩台 CDS 也只會有一個物件。
+ * 沒查病人時（--no-patients）不放 lifetimeNumber，不留一排 null。
+ */
+function groupByBed(rows) {
+  const byBed = new Map();
+  for (const r of rows) {
+    const { bed, lifetimeNumber, ...rec } = r;
+    const key = normBed(bed);
+    let g = byBed.get(key);
+    if (!g) {
+      g = 'lifetimeNumber' in r
+        ? { bed: bed != null ? bed : null, lifetimeNumber: lifetimeNumber != null ? lifetimeNumber : null, records: [] }
+        : { bed: bed != null ? bed : null, records: [] };
+      byBed.set(key, g);
+    }
+    g.records.push(rec);
+  }
+  return [...byBed.values()].sort((a, b) => compareBeds(a.bed, b.bed));
 }
 
 /**
@@ -1328,20 +1383,21 @@ async function main() {
     }
   });
 
-  // 預設輸出單一 JSON 陣列（與 index.js 一致）。每一筆只留下游用得到的欄位，
-  // 站台 / 來源表 / parameterId 這些內部資訊不輸出。
+  // 預設輸出單一 JSON 陣列，一床一筆（與 neuro.js 同一個形狀），量測值收在 records[]。
+  // 每一筆只留下游用得到的欄位，站台 / 來源表 / parameterId 這些內部資訊不輸出。
   // 需要各站狀態時加 --with-summary，會包成 { summary, rows }。
   const withSummary = args.withSummary || settings.includeSummary === true;
   saveAnchors(settings.anchorCacheFile, anchors);
 
-  const payload = withSummary ? { summary, rows: merged } : merged;
+  const beds = groupByBed(merged);
+  const payload = withSummary ? { summary, rows: beds } : beds;
   const json = args.pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
   const outAbs = path.resolve(process.cwd(), outFile);
   fs.writeFileSync(outAbs, json, 'utf8');
 
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   console.log('----------------------------------------');
-  console.log(`合併總筆數：${merged.length}`);
+  console.log(`合併總筆數：${merged.length} 筆，${beds.length} 床`);
   console.log(`成功：${sites.length - failures} / ${sites.length}，耗時 ${secs}s`);
   console.log(`已輸出：${outAbs}`);
 
@@ -1377,4 +1433,6 @@ module.exports = {
   tablesForWindow,
   dedupePerMinute,
   shiftTimes,
+  compareBeds,
+  groupByBed,
 };

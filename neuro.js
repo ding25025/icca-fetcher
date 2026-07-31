@@ -483,12 +483,9 @@ async function main() {
     }
   });
 
-  // 病人依床號排序（沒床的排最後），跨分片合併後才看得出病房順序
-  const merged = [...byPatient.values()].sort((a, b) => {
-    if (a.bed == null) return b.bed == null ? 0 : 1;
-    if (b.bed == null) return -1;
-    return String(a.bed).localeCompare(String(b.bed));
-  });
+  // 病人依床號排序（沒床的排最後），跨分片合併後才看得出病房順序。
+  // 用 vitals.js 那支自然排序，ICU-10 才不會排到 ICU-2 前面，兩支輸出順序也一致。
+  const merged = [...byPatient.values()].sort((a, b) => V.compareBeds(a.bed, b.bed));
 
   const withSummary = args.withSummary || settings.includeSummary === true;
   const payload = withSummary ? { summary, rows: merged } : merged;
