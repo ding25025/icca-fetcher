@@ -5,7 +5,6 @@
  *   ptEncounterId          PtIntervention 的過濾鑰匙
  *   dbSqlInstance / dbName 該病人的病歷資料實際落在哪台 SQL / 哪個 CISChartingDBxxxx
  *   lifetimeNumber         病歷號，原名併進輸出
- *   encounterNumber        住院帳號，原名併進輸出
  *   bed                    床號，方便對照（LEFT JOIN，沒床也留）
  *
  * 一個病人一列。neuro.js 會依 (dbSqlInstance, dbName) 分組，每個 charting DB 連一次，
@@ -26,7 +25,6 @@ SELECT DISTINCT
     ,hd.dbName
     ,pe.ptEncounterId
     ,p.lifetimeNumber          -- 病歷號
-    ,pe.encounterNumber        -- 住院帳號
     ,b.displayLabel AS bed     -- 床號（對照用）
 FROM      dbo.PtLocationStay ls WITH (NOLOCK)
 JOIN      dbo.PtEncounter    pe WITH (NOLOCK) ON pe.ptEncounterId  = ls.ptEncounterId

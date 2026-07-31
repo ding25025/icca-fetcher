@@ -14,7 +14,8 @@
  *   3. 依 (dbSqlInstance, dbName) 分組，每個 CISChartingDBxxxx 連一次，查
  *      dbo.PtIntervention：interventionId 在清單內、ptEncounterId 在該組內、
  *      且 storeTime 落在近一小時（有異動）。
- *   4. 合併 → 併 terseLabel + 病歷號 → 時間換算 +8 → 輸出單一 JSON 陣列 neuro_{ts}.json。
+ *   4. 合併 → 併 terseLabel → 時間換算 +8 → 依病人收成一筆（病歷號 + 床號 + records[]）
+ *      → 輸出單一 JSON 陣列 neuro_{ts}.json（依床號排序）。
  *
  * 關鍵差異：
  *   - 病歷資料不是環狀表，是照 HostDb 分片到多個 CISChartingDB。定位靠 HostDb，不掃表。
@@ -214,7 +215,7 @@ function loadIdsFile(file) {
 /**
  * 把 neuro-encounters.sql 回來的列整理成：
  *   groups   Map<instance\x00db, { dbSqlInstance, dbName, encounterIds:[] }>
- *   patients Map<大寫ptEncounterId, { lifetimeNumber, encounterNumber, bed }>
+ *   patients Map<大寫ptEncounterId, { lifetimeNumber, bed }>
  */
 function indexEncounters(rows) {
   const groups = new Map();
@@ -226,7 +227,6 @@ function indexEncounters(rows) {
     if (!patients.has(encKey)) {
       patients.set(encKey, {
         lifetimeNumber: r.lifetimeNumber != null ? r.lifetimeNumber : null,
-        encounterNumber: r.encounterNumber != null ? r.encounterNumber : null,
         bed: r.bed != null ? r.bed : null,
       });
     }
@@ -440,21 +440,30 @@ async function main() {
   // 4. 合併 + 併 terseLabel / 病歷號 + 時區換算
   const labelOf = (id) => interventions.labels[upper(id)] || null;
   const useUtc = args.utc || settings.timesInUtc;
-  const merged = [];
+  // 同一個病人（ptEncounterId）的紀錄收在一起：{ lifetimeNumber, bed, records:[] }
+  const byPatient = new Map();
   const summary = [];
   let failures = 0;
+  let total = 0;
 
   settled.forEach((s, i) => {
     const g = groups[i];
     if (s.status === 'fulfilled') {
       const { rows, count, encounters } = s.value;
+      total += rows.length;
       for (const r of rows) {
-        const pt = patients.get(upper(r.ptEncounterId)) || {};
-        const base = {
-          _db: g.dbName,
-          lifetimeNumber: pt.lifetimeNumber != null ? pt.lifetimeNumber : null, // 病歷號
-          encounterNumber: pt.encounterNumber != null ? pt.encounterNumber : null, // 住院帳號
-          bed: pt.bed != null ? pt.bed : null,
+        const encKey = upper(r.ptEncounterId);
+        const pt = patients.get(encKey) || {};
+        let p = byPatient.get(encKey);
+        if (!p) {
+          p = {
+            lifetimeNumber: pt.lifetimeNumber != null ? pt.lifetimeNumber : null, // 病歷號
+            bed: pt.bed != null ? pt.bed : null,
+            records: [],
+          };
+          byPatient.set(encKey, p);
+        }
+        const rec = {
           interventionId: r.interventionId,
           terseLabel: labelOf(r.interventionId),
           terseForm: r.terseForm,
@@ -462,7 +471,7 @@ async function main() {
           addTime: r.addTime,
           chartTime: r.chartTime,
         };
-        merged.push(useUtc ? base : shiftTimes(base, offset));
+        p.records.push(useUtc ? rec : shiftTimes(rec, offset));
       }
       summary.push({ db: g.dbName, instance: g.dbSqlInstance, ok: true, encounters, count });
       console.log(`  ✓ ${g.dbName}：${count} 筆（${encounters} 位病人）`);
@@ -474,6 +483,13 @@ async function main() {
     }
   });
 
+  // 病人依床號排序（沒床的排最後），跨分片合併後才看得出病房順序
+  const merged = [...byPatient.values()].sort((a, b) => {
+    if (a.bed == null) return b.bed == null ? 0 : 1;
+    if (b.bed == null) return -1;
+    return String(a.bed).localeCompare(String(b.bed));
+  });
+
   const withSummary = args.withSummary || settings.includeSummary === true;
   const payload = withSummary ? { summary, rows: merged } : merged;
   const json = args.pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
@@ -482,7 +498,7 @@ async function main() {
 
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   console.log('----------------------------------------');
-  console.log(`合併總筆數：${merged.length}`);
+  console.log(`合併總筆數：${total} 筆，${merged.length} 位病人`);
   console.log(`成功：${groups.length - failures} / ${groups.length} 個 charting 資料庫，耗時 ${secs}s`);
   console.log(`已輸出：${outAbs}`);
 
