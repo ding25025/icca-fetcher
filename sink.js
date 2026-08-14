@@ -527,7 +527,17 @@ async function writeRows(kind, rows, settings) {
       // 後面的 INSERT 會拿到 "Invalid object name '#stage'"。
       // batch() 走 execSqlBatch，直接送批次，暫存表才活在整個連線工作階段裡。
       // 後面帶參數的 INSERT 照樣用 query()：它們是「讀得到外層暫存表」的那一邊，沒問題。
-      await new sql.Request(tx).batch(`SET NOCOUNT ON;\nCREATE TABLE ${stage} (\n${stageCols}\n);`);
+      //
+      // 反過來的問題是它活得夠久：server.js 用溫熱連線池（release 不會真的關掉連線），
+      // 下一輪很可能拿到同一條連線，那時 #stage 還在，CREATE 會撞上
+      // "There is already an object named '#stage'"。所以建之前先清掉。
+      // 用 OBJECT_ID 判斷而不是 DROP TABLE IF EXISTS：後者要 SQL Server 2016 以上，
+      // 這一句在更舊的版本也要能跑。
+      await new sql.Request(tx).batch(
+        `SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..${stage}') IS NOT NULL DROP TABLE ${stage};
+CREATE TABLE ${stage} (\n${stageCols}\n);`
+      );
       for (const c of chunks) await insertBatch(() => new sql.Request(tx), stage, spec, c, stats);
 
       // 已經在表裡的（同鑰匙或同內容）不會被寫，也不會被更新
