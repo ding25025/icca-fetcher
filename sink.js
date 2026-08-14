@@ -521,7 +521,13 @@ async function writeRows(kind, rows, settings) {
     try {
       const stage = '#stage';
       const stageCols = colsOf(spec).map((c) => `  [${c.name}] ${c.type} NULL`).join(',\n');
-      await new sql.Request(tx).query(`SET NOCOUNT ON;\nCREATE TABLE ${stage} (\n${stageCols}\n);`);
+      // ⚠ 這一句一定要用 batch() 不能用 query()。
+      // query() 走 tedious 的 execSql，會被包進 sp_executesql 執行；在 sp_executesql
+      // 裡建的區域暫存表，作用域只到那一次呼叫結束——回來之後 #stage 就不存在了，
+      // 後面的 INSERT 會拿到 "Invalid object name '#stage'"。
+      // batch() 走 execSqlBatch，直接送批次，暫存表才活在整個連線工作階段裡。
+      // 後面帶參數的 INSERT 照樣用 query()：它們是「讀得到外層暫存表」的那一邊，沒問題。
+      await new sql.Request(tx).batch(`SET NOCOUNT ON;\nCREATE TABLE ${stage} (\n${stageCols}\n);`);
       for (const c of chunks) await insertBatch(() => new sql.Request(tx), stage, spec, c, stats);
 
       // 已經在表裡的（同鑰匙或同內容）不會被寫，也不會被更新
