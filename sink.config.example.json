@@ -1,0 +1,32 @@
+{
+  "_comment": "中介資料庫（sink）的設定。跟 databases.config.json 分開放——那個檔的 databases[] 是資料來源清單，vitals.js 會照資料庫名稱自動分類，中介庫放進去會被當成一台 primary。複製成 sink.config.json 再改（該檔含明文密碼，已在 .gitignore）。要換檔名就設環境變數 SINK_CONFIG，或加 --sink-config <檔案>。",
+
+  "_comment_enabled": "沒設成 true 就完全不碰中介資料庫；命令列的 --to-db 可以臨時打開，--no-db 一律優先。",
+  "enabled": true,
+
+  "_comment_connection": "格式與 databases[].connection 完全一樣，密碼一樣支援 \"env:變數名\"。",
+  "connection": {
+    "server": "10.0.0.50",
+    "port": 1433,
+    "database": "ICU_DW",
+    "user": "sa",
+    "password": "env:SINK_PASSWORD",
+    "options": {
+      "encrypt": false,
+      "trustServerCertificate": true
+    }
+  },
+
+  "schema": "dbo",
+  "vitalsTable": "CDSUnvalidatedData",
+  "neuroTable": "CISData",
+
+  "_comment_ensureTables": "缺表就自動建（已存在的不動，不會改欄位）。改由院內 DBA 先用 sql/sink-schema.sql 建好之後可以設 false。",
+  "ensureTables": true,
+
+  "_comment_alsoWriteFile": "寫進資料庫之後還要不要照舊落一份 JSON 檔，預設 false。",
+  "alsoWriteFile": false,
+
+  "_comment_schedule": "server.js 常駐時自己定時撈並寫入，不必外部排程器。時間窗會自動用「間隔 + windowSlackMinutes」，寧可重疊（重複的在寫入時會被擋掉）也不要漏。整個 schedule 拿掉就改由 /icca/push/vitals、/icca/push/neuro 外部觸發。",
+  "schedule": { "vitalsMinutes": 5, "neuroMinutes": 5, "windowSlackMinutes": 1 }
+}

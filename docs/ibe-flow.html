@@ -1,0 +1,791 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="Vicky Wu">
+<title>ICCA → 中介資料庫 資料流</title>
+</head>
+<body>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; }
+  img, svg { max-width: 100%; }
+
+  :root {
+    /* 監視器導程的配色：生命徵象走綠、神經評估走藍，結構線用儀器深藍 */
+    --paper: #F4F6F8;
+    --panel: #FFFFFF;
+    --panel-2: #EAEFF4;
+    --line: #D5DDE6;
+    --line-soft: #E4EAF0;
+    --ink: #121B24;
+    --ink-2: #4B5A69;
+    --ink-3: #7B8A99;
+    --spine: #294B63;
+    --ch-a: #0E8A62;
+    --ch-b: #1C6EA8;
+    --warn: #A9631A;
+    --crit: #AC3743;
+    --tint-a: rgba(14, 138, 98, 0.10);
+    --tint-b: rgba(28, 110, 168, 0.10);
+    --tint-warn: rgba(169, 99, 26, 0.10);
+    --shadow: 0 1px 2px rgba(18, 27, 36, 0.05), 0 8px 24px -16px rgba(18, 27, 36, 0.35);
+
+    --sans: system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC", sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", "Noto Sans Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0C1218;
+      --panel: #141C25;
+      --panel-2: #1A232D;
+      --line: #28333E;
+      --line-soft: #202A34;
+      --ink: #E3E9EF;
+      --ink-2: #A1AEBB;
+      --ink-3: #72808D;
+      --spine: #74A9CD;
+      --ch-a: #33BE89;
+      --ch-b: #59A8DC;
+      --warn: #D2924A;
+      --crit: #DF6670;
+      --tint-a: rgba(51, 190, 137, 0.12);
+      --tint-b: rgba(89, 168, 220, 0.12);
+      --tint-warn: rgba(210, 146, 74, 0.12);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -16px rgba(0, 0, 0, 0.8);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --paper: #F4F6F8;
+    --panel: #FFFFFF;
+    --panel-2: #EAEFF4;
+    --line: #D5DDE6;
+    --line-soft: #E4EAF0;
+    --ink: #121B24;
+    --ink-2: #4B5A69;
+    --ink-3: #7B8A99;
+    --spine: #294B63;
+    --ch-a: #0E8A62;
+    --ch-b: #1C6EA8;
+    --warn: #A9631A;
+    --crit: #AC3743;
+    --tint-a: rgba(14, 138, 98, 0.10);
+    --tint-b: rgba(28, 110, 168, 0.10);
+    --tint-warn: rgba(169, 99, 26, 0.10);
+    --shadow: 0 1px 2px rgba(18, 27, 36, 0.05), 0 8px 24px -16px rgba(18, 27, 36, 0.35);
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0C1218;
+    --panel: #141C25;
+    --panel-2: #1A232D;
+    --line: #28333E;
+    --line-soft: #202A34;
+    --ink: #E3E9EF;
+    --ink-2: #A1AEBB;
+    --ink-3: #72808D;
+    --spine: #74A9CD;
+    --ch-a: #33BE89;
+    --ch-b: #59A8DC;
+    --warn: #D2924A;
+    --crit: #DF6670;
+    --tint-a: rgba(51, 190, 137, 0.12);
+    --tint-b: rgba(89, 168, 220, 0.12);
+    --tint-warn: rgba(210, 146, 74, 0.12);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -16px rgba(0, 0, 0, 0.8);
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 40px) 96px;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(40px, 6vw, 68px);
+  }
+
+  /* ---------- 通用排版 ---------- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-size: clamp(28px, 4.6vw, 44px);
+    line-height: 1.15;
+    letter-spacing: -0.022em;
+    font-weight: 640;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h2 {
+    font-size: clamp(19px, 2.4vw, 23px);
+    line-height: 1.3;
+    letter-spacing: -0.012em;
+    font-weight: 620;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h3 {
+    font-size: 15px;
+    font-weight: 620;
+    letter-spacing: -0.005em;
+    margin: 0;
+  }
+
+  p { margin: 0; }
+  .lede { color: var(--ink-2); max-width: 64ch; font-size: 17px; }
+  .note { color: var(--ink-2); font-size: 14.5px; max-width: 72ch; }
+
+  code, .mono { font-family: var(--mono); font-size: 0.88em; }
+
+  code {
+    background: var(--panel-2);
+    border: 1px solid var(--line-soft);
+    border-radius: 3px;
+    padding: 0.1em 0.36em;
+    white-space: nowrap;
+  }
+
+  section { display: flex; flex-direction: column; gap: 20px; }
+  .section-head { display: flex; flex-direction: column; gap: 8px; }
+
+  /* ---------- 標頭 ---------- */
+  header { display: flex; flex-direction: column; gap: 18px; }
+
+  .trace {
+    display: block;
+    width: 100%;
+    height: 34px;
+    color: var(--ch-a);
+    opacity: 0.75;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+  .meta b { color: var(--ink-2); font-weight: 500; }
+
+  /* ---------- 訊號鏈 ---------- */
+  .route {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    padding: clamp(18px, 3vw, 26px);
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .route-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ch);
+    background: var(--tint);
+    border: 1px solid var(--ch);
+    padding: 3px 9px;
+    white-space: nowrap;
+  }
+
+  .cadence {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chain {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 30px;
+  }
+
+  .step {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  /* 連接線：畫在格與格之間的空隙裡 */
+  .step + .step::before {
+    content: "";
+    position: absolute;
+    left: -30px;
+    top: 13px;
+    width: 30px;
+    height: 1px;
+    background: var(--ch);
+    opacity: 0.55;
+  }
+  .step + .step::after {
+    content: "";
+    position: absolute;
+    left: -8px;
+    top: 9.5px;
+    border: 4px solid transparent;
+    border-left-color: var(--ch);
+    opacity: 0.55;
+  }
+
+  .step-kind {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .step-kind::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    background: var(--ch);
+    flex: none;
+  }
+
+  .step h3 { font-size: 14.5px; }
+  .step p { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; }
+
+  .step .url {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink);
+    background: var(--panel-2);
+    border: 1px solid var(--line-soft);
+    padding: 5px 7px;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .step.external h3 { color: var(--ch); }
+
+  @media (max-width: 900px) {
+    .chain { grid-template-columns: 1fr; gap: 26px; }
+    .step + .step::before { left: 3px; top: -26px; width: 1px; height: 26px; }
+    .step + .step::after {
+      left: -0.5px;
+      top: -8px;
+      border-color: transparent;
+      border-top-color: var(--ch);
+    }
+  }
+
+  /* ---------- 往返時序 ---------- */
+  .seq { display: grid; gap: 0; }
+
+  .seq-row {
+    display: grid;
+    grid-template-columns: 46px 118px 1fr;
+    gap: 16px;
+    align-items: baseline;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .seq-row:first-child { border-top: 1px solid var(--line); }
+
+  .seq-n {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .actor {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-2);
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+  }
+  .actor::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    flex: none;
+    background: var(--dot, var(--ink-3));
+    transform: translateY(-1px);
+  }
+
+  .seq-row p { font-size: 14.5px; }
+  .seq-row .sub { color: var(--ink-2); font-size: 13px; margin-top: 3px; }
+
+  @media (max-width: 700px) {
+    .seq-row { grid-template-columns: 34px 1fr; gap: 6px 12px; }
+    .actor { grid-column: 2; }
+    .seq-row > p, .seq-row > div { grid-column: 2; }
+  }
+
+  /* ---------- 卡片群 ---------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+    gap: 16px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .card p { font-size: 14px; color: var(--ink-2); }
+  .card .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--tone, var(--ink-3));
+  }
+
+  /* ---------- 表格 ---------- */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; min-width: 540px; font-size: 14px; }
+  th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* ---------- 待確認清單 ---------- */
+  .open {
+    border-left: 3px solid var(--warn);
+    background: var(--tint-warn);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .open ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
+  .open li { font-size: 14.5px; color: var(--ink-2); }
+  .open li b { color: var(--ink); font-weight: 600; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">整合流程 · 直接寫資料庫</p>
+    <h1>一支常駐服務，兩個排程，資料直接落到中介資料庫</h1>
+    <p class="lede">
+      <code>icca-fetcher</code> 自己定時撈，撈完把 <code>records[]</code> 攤平成一筆一列，
+      <b>只新增</b>地寫進中介資料庫的兩張表。中間沒有 JSON 檔、沒有轉格式、沒有整合引擎。
+      已經寫進去的列不會再被改動也不會被刪——護理師改過的紀錄是<b>多寫一列</b>。
+      下游從那兩張表讀，交接點就是<b>表結構</b>——完整規格見
+      <a href="https://claude.ai/code/artifact/021ff727-e351-4e6a-a1fa-a83a9e5da4af">中介資料庫 Schema</a>。
+    </p>
+    <svg class="trace" viewBox="0 0 1200 40" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+      <path d="M0 26 H150 l10 0 4 -3 5 6 6 -18 7 34 6 -19 5 0 H420 l10 0 4 -3 5 6 6 -18 7 34 6 -19 5 0 H690 l10 0 4 -3 5 6 6 -18 7 34 6 -19 5 0 H960 l10 0 4 -3 5 6 6 -18 7 34 6 -19 5 0 H1200"
+            fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+    </svg>
+    <div class="meta">
+      <span><b>服務</b> 127.0.0.1:8770</span>
+      <span><b>寫入</b> ICU_DW · CDSUnvalidatedData / CISData</span>
+      <span><b>狀態</b> 待接正式機</span>
+      <span><b>作者</b> Vicky Wu</span>
+    </div>
+  </header>
+
+  <!-- ======== 訊號鏈 ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">排程佈局</p>
+      <h2>同一個 5 分鐘節奏，兩邊同時撈</h2>
+      <p class="note">
+        兩邊都是每 5 分鐘同時觸發，但來源與欄位完全不同，各自跑各自的交易——一邊失敗不影響另一邊。
+        形狀一樣：時間到 → 撈 → 攤平 → 寫入。
+        設定就是 <code>sink.schedule</code> 裡的兩個數字（現在都是 5）。
+      </p>
+    </div>
+
+    <div class="route" style="--ch: var(--ch-a); --tint: var(--tint-a);">
+      <div class="route-head">
+        <span class="chip">排程 A</span>
+        <h2>生命徵象</h2>
+        <span class="cadence">每 5 分鐘 · 寫進 CDSUnvalidatedData</span>
+      </div>
+      <ol class="chain">
+        <li class="step">
+          <span class="step-kind">Timer</span>
+          <h3>服務內建排程</h3>
+          <div class="url">"schedule": { "vitalsMinutes": 5 }</div>
+          <p>上一輪還沒跑完就跳過這一輪，不排隊。</p>
+        </li>
+        <li class="step">
+          <span class="step-kind">vitals.js</span>
+          <h3>撈近 6 分鐘</h3>
+          <p>間隔 + 1 分鐘餘裕。溫熱的連線池平行查 7 個 CDS，先定位環狀表的寫入頭。</p>
+        </li>
+        <li class="step">
+          <span class="step-kind">sink.js</span>
+          <h3>攤平成一筆一列</h3>
+          <p><code>records[]</code> 展開，病歷號跟著每一列走（床號不寫進表）。時間走字面值，不會被驅動再換算一次。</p>
+        </li>
+        <li class="step external">
+          <span class="step-kind">SQL Server</span>
+          <h3>一個交易 INSERT 進去</h3>
+          <div class="url">#stage → 濾掉已經有的 → INSERT dbo.CDSUnvalidatedData</div>
+          <p>唯一鍵是病歷號＋<code>terseLabel</code>＋<code>propName</code>＋<code>chartTime</code>。
+            已經在表裡的那幾列就不寫，出錯整批 rollback。</p>
+        </li>
+      </ol>
+    </div>
+
+    <div class="route" style="--ch: var(--ch-b); --tint: var(--tint-b);">
+      <div class="route-head">
+        <span class="chip">排程 B</span>
+        <h2>神經評估</h2>
+        <span class="cadence">每 5 分鐘 · 寫進 CISData</span>
+      </div>
+      <ol class="chain">
+        <li class="step">
+          <span class="step-kind">Timer</span>
+          <h3>服務內建排程</h3>
+          <div class="url">"schedule": { "neuroMinutes": 5 }</div>
+          <p>跟生命徵象同時觸發，護理師剛填完幾分鐘內就會進表。</p>
+        </li>
+        <li class="step">
+          <span class="step-kind">neuro.js</span>
+          <h3>撈近 6 分鐘</h3>
+          <p>照 <code>HostDb</code> 分片平行查各 charting 資料庫。正式機實測整輪約 0.9 秒。</p>
+        </li>
+        <li class="step">
+          <span class="step-kind">sink.js</span>
+          <h3>攤平成一筆一列</h3>
+          <p>同一套程式，只是欄位不同。病人的鑰匙用 <code>ptEncounterId</code>，不受轉床影響。</p>
+        </li>
+        <li class="step external">
+          <span class="step-kind">SQL Server</span>
+          <h3>一個交易 INSERT 進去</h3>
+          <div class="url">#stage → 比對內容 → INSERT dbo.CISData</div>
+          <p>內容一模一樣就不寫；護理師改過或作廢就<b>多一列</b>，舊的那一列原封不動留著。</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ======== 一次觸發的往返 ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">單次觸發 · 時序</p>
+      <h2>一個 5 分鐘週期實際發生什麼</h2>
+      <p class="note">
+        編號就是先後順序。撈的那幾步是既有的 <code>vitals.js</code>，一行都沒改；
+        改的只有最後：結果不再變成檔案或 HTTP 回應，而是直接進資料庫。
+      </p>
+    </div>
+
+    <div class="seq">
+      <div class="seq-row">
+        <span class="seq-n">01</span>
+        <span class="actor" style="--dot: var(--ch-a);">排程</span>
+        <div>
+          <p>服務內建的計時器到點。</p>
+          <p class="sub">上一輪還沒結束就跳過，log 寫一行警告——排隊只會越積越多，而下一輪的窗本來就蓋得到漏掉的那一段。</p>
+        </div>
+      </div>
+      <div class="seq-row">
+        <span class="seq-n">02</span>
+        <span class="actor" style="--dot: var(--spine);">vitals.js</span>
+        <div>
+          <p>用溫熱的連線池平行查 7 個 CDS：先定位環狀表的寫入頭，只查該撈的那一兩張。</p>
+          <p class="sub">同時向 primary 查在床病人，兩邊用床號對起來。</p>
+        </div>
+      </div>
+      <div class="seq-row">
+        <span class="seq-n">03</span>
+        <span class="actor" style="--dot: var(--spine);">vitals.js</span>
+        <p>合併、去重、換算成本地時間，依床號自然排序，得到一床一筆的結果。</p>
+      </div>
+      <div class="seq-row">
+        <span class="seq-n">04</span>
+        <span class="actor" style="--dot: var(--ch-a);">sink.js</span>
+        <div>
+          <p><code>records[]</code> 攤平成一筆一列，鑰匙欄位的 null 正規化成空字串（<code>HR</code> 這種單值項目的 <code>propName</code> 就是 <code>''</code>）。</p>
+          <p class="sub">SQL Server 的 NULL 不等於 NULL——鑰匙留著 null 的話比對永遠比不中，每一輪都會多寫一列。</p>
+        </div>
+      </div>
+      <div class="seq-row">
+        <span class="seq-n">05</span>
+        <span class="actor" style="--dot: var(--ch-a);">sink.js</span>
+        <div>
+          <p>開交易 → 建 <code>#stage</code> → 分批 <code>INSERT</code>（一批約 200 列）→ 跟正式表比對、把新的一次 <code>INSERT</code> 進去 → commit。</p>
+          <p class="sub">分批是因為 SQL Server 單次請求最多 2100 個參數。整段在同一個交易裡，中途失敗全部 rollback。</p>
+        </div>
+      </div>
+      <div class="seq-row">
+        <span class="seq-n">06</span>
+        <span class="actor" style="--dot: var(--spine);">log</span>
+        <p>寫一行結果：這一輪撈到幾筆、實際寫進去幾筆、重複略過幾筆、花了多久。</p>
+      </div>
+      <div class="seq-row">
+        <span class="seq-n">07</span>
+        <span class="actor" style="--dot: var(--crit);">失敗</span>
+        <p>撈失敗或寫失敗都只寫 log，服務照常活著、下一輪再試。全部站台掛掉的那一輪<b>不寫</b>——0 筆寫進去跟「真的沒資料」長得一模一樣。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======== 時間窗 ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">參數對齊</p>
+      <h2>時間窗要跟排程間隔對齊</h2>
+      <p class="note">
+        <code>window</code> 是「撈最近幾分鐘」。窗比間隔小會漏資料，比間隔大則會重複撈到——
+        但重複的那一份在寫入前就被擋掉了。兩種風險不對等，所以一律往重疊的那邊倒。
+      </p>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Route</th>
+            <th>觸發間隔</th>
+            <th>建議 window</th>
+            <th>結果</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>A 生命徵象</td>
+            <td class="num">5 分鐘</td>
+            <td class="num">6</td>
+            <td>多 1 分鐘重疊，排程晚一點也不會斷片</td>
+          </tr>
+          <tr>
+            <td>B 神經評估</td>
+            <td class="num">5 分鐘</td>
+            <td class="num">6</td>
+            <td>同上。重疊的部分內容沒變就不會寫進去</td>
+          </tr>
+          <tr>
+            <td>補撈</td>
+            <td class="num">臨時</td>
+            <td class="num">30 / 1440</td>
+            <td>某輪掛掉就 <code>GET /icca/push/vitals?window=30</code> 把窗開大再打一次</td>
+          </tr>
+          <tr>
+            <td>心跳</td>
+            <td class="num">1–5 分鐘</td>
+            <td class="num">—</td>
+            <td>打 <code>/health</code>，再加一句 <code>MAX(insertedAt)</code> 查詢盯資料本身，落後超過 15 分鐘就是異常</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======== 失敗 ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">失敗怎麼表達</p>
+      <h2>「沒資料」和「壞掉」不能長得一樣</h2>
+      <p class="note">
+        寫進資料庫之後這件事更重要了：下游看到的是表，表裡沒有新資料的時候，
+        它分不出是這段時間真的沒量測，還是撈的那一端已經斷了三個小時。
+      </p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="tag" style="--tone: var(--crit);">全滅 · 不寫</span>
+        <h3>所有站台都連不上</h3>
+        <p>這一輪<b>不寫任何東西</b>，log 留下各站的失敗原因。寫 0 筆進去跟「真的沒資料」在表裡
+          完全一樣，等有人發現已經斷好幾小時了。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--warn);">部分失敗 · 照寫</span>
+        <h3>有幾站掛了，其餘照寫</h3>
+        <p>剩下的資料還是有用，照樣寫進去，log 寫一行警告。哪幾床沒進來要對照
+          <code>/icca/vitals?withSummary=1</code> 才看得出來。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--ch-b);">寫 0 筆 · 正常</span>
+        <h3>撈到了，但全是重複的</h3>
+        <p>時間窗重疊時本來就會這樣，<code>written</code> 接近 0 正代表去重是通的。
+          跟「撈不到」是兩件事，log 裡分得出來。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--crit);">寫入失敗 · rollback</span>
+        <h3>中介資料庫連不上或被鎖住</h3>
+        <p>整批 rollback，不會留半批。服務照常活著、下一輪再試；補的方法是把
+          <code>window</code> 開大再打一次 <code>/icca/push/*</code>。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======== 去重 ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">已定案 · 只新增不更新</p>
+      <h2>鑰匙就是資料表設計的核心</h2>
+      <p class="note">
+        時間窗一定會重疊，同一筆資料至少被撈到兩次。重複的在寫入那一刻就擋掉，
+        下游不必再約定「誰負責去重」。但<b>只擋一模一樣的</b>——內容真的變了是多寫一列，
+        既有的列一律不動。</p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="tag" style="--tone: var(--ch-a);">CDSUnvalidatedData</span>
+        <h3>病歷號 ＋ terseLabel ＋ propName ＋ chartTime</h3>
+        <p>CDS 那邊只有床與儀器，但<b>床號不寫進中介表</b>——同一床會換病人。撈的時候用床號
+          對到病歷號，對不到的<b>整列不寫</b>。<code>terseLabel</code> 要配 <code>propName</code>——
+          <code>ABP</code> 底下有 systolic / diastolic / mean 三種，只看前者分不出是收縮壓。
+          量測時間對外叫 <code>chartTime</code>（ICCA 端是 <code>measurementTime</code>），
+          跟 <code>CISData</code> 的臨床時間同名同角色。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--ch-b);">CISData</span>
+        <h3>ptEncounterId ＋ interventionId ＋ chartTime</h3>
+        <p>鑰匙這裡<b>不能</b>用病歷號：同一位病人的病歷號在紀錄被改寫時不保證跟著走，
+          <code>ptEncounterId</code> 則是從入院到出院都不變。病歷號仍然一律要有值，
+          沒有就整列不寫。<code>ptEncounterId</code> 不在 JSON 輸出裡，程式內部一直有，寫入時才拿出來用；
+          對外規格也不公開這一欄，只說「醫院端內部使用的病人識別欄位」。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--spine);">比中之後</span>
+        <h3>兩張表都不做 UPDATE</h3>
+        <p>儀器讀值不會改，比中就不寫，<b>一組唯一鍵永遠只有一列</b>；primary 掛掉查不到病歷號的那一輪
+          <b>整批不寫</b>，不會留下認不出是誰的列。病歷紀錄則是護理師可以回頭改的——
+          改過或作廢（<code>isDeleted = 1</code>）都是<b>再寫一列</b>，同一組識別鍵底下靠
+          <code>storeTime</code> 分先後，最大的那一列是現值。<code>CDSUnvalidatedData</code>
+          沒有 <code>isDeleted</code>，來源只寫不改。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--spine);">下游怎麼讀</span>
+        <h3>用 storeTime 當水位線</h3>
+        <p>表只會長大不會清，下游要增量讀就查 <code>storeTime &gt; @上次</code>——它是 ICCA 端的寫入時間，
+          紀錄被改時會跟著變新，所以新資料與新版本都追得到。表裡<b>沒有流水號欄位</b>，也沒有
+          <code>updatedAt</code>／<code>changedAt</code>：列寫進去就不會再動，那兩欄沒有值可以放。
+          <code>insertedAt</code> 留著，但只拿來核對拋轉有沒有斷（同一批寫入的時間戳相同，當水位線會重複讀或漏讀）。
+          <b>補撈歷史資料</b>寫進去的列 <code>storeTime</code> 很舊，會落在下游水位線後面讀不到——補完要通知下游把該段整段重讀。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--warn);">量體</span>
+        <h3>一天約 50 萬列</h3>
+        <p>生命徵象一輪約 1800 筆、288 輪，加上神經評估。走的是內網 SQL 連線，
+          一輪的寫入時間以秒計。清理排程也是院方要做的事——庫是院方的，
+          沒有別人會來收，期限一天沒定表就一天在長。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======== 測試 vs 正式 ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">目前狀態</p>
+      <h2>落檔還在，但已經不在正式流程上</h2>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="tag">排錯 · 落檔</span>
+        <h3>手動跑，產 JSON 檔</h3>
+        <p><code>node vitals.js --no-db</code> 照舊寫出 <code>vitals_{ts}.json</code>，
+          用來確認欄位與內容。設 <code>alsoWriteFile</code> 則是寫資料庫的同時也留一份。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--ch-a);">正式 · 寫資料庫</span>
+        <h3>服務常駐，自己定時寫</h3>
+        <p>同一段程式，撈完直接進表。沒有中間格式、沒有整合引擎、沒有訊息佇列——
+          少三個可能斷掉的地方。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--spine);">部署</span>
+        <h3>nssm 註冊成 Windows 服務，不掛 IIS</h3>
+        <p><code>server.js</code> 自己就是 HTTP server，前面不需要再放一層。IIS 的
+          application pool 會 idle 回收行程，正好把常駐連線池與表號快取打掉——那是這支服務唯一的優點。
+          用 nssm 開機自動啟動、當掉自動重拉；改設定檔要 restart 才會重讀。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--ch-b);">建表</span>
+        <h3>庫是院方的，所以建表很自由</h3>
+        <p>不必跟外部單位協調 DDL：<code>node sink.js --init</code> 直接建，或把
+          <code>sql/sink-schema.sql</code> 交給院內 DBA 建好再把 <code>ensureTables</code> 關掉。
+          <code>node sink.js --check</code> 看得到通不通、表在不在、目前幾筆。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======== 待確認 ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">還沒定的事</p>
+      <h2>接正式機之前要先確認</h2>
+    </div>
+    <div class="open">
+      <ul>
+        <li><b>中介資料庫的連線資訊</b>——<b>8/6 與資訊室主任會議討論確認，由院方提供一台專用 Server</b>，庫也由院方建置維護，所以主機與權限都不是問題（要 <code>CREATE TABLE</code> 讓 <code>ensureTables</code> 自己建也行）。還缺的是實例名稱、資料庫名稱、寫入帳號與備份策略。</li>
+        <li><b>下游的唯讀帳號要開給誰</b>——來源 IP／網段、幾組帳號，只給那兩張表的 <code>SELECT</code>。要不要另開一組測試庫的也一起決定。</li>
+        <li><b>表名與欄位要不要改</b>——目前是 <code>CDSUnvalidatedData</code> / <code>CISData</code>，欄位沿用撈出來的原名。下游若已經有既定的命名慣例，現在改最便宜（改 <code>sink.js</code> 的 spec，重新產一次 DDL）。</li>
+        <li><b>舊資料保留多久</b>——一天約 50 萬列，清理由院方排程做，但期限要看下游要不要自己留一份：下游會完整複製走的話這裡設短一點（3 天）就夠，中介庫只當緩衝；不複製的話至少 7 天。規格書 §6 Q2 已經把這題丟給下游回答。</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>icca-fetcher · server.js / vitals.js / neuro.js / sink.js · 細節見專案的 SERVER.md</footer>
+
+</div>
+</body>
+</html>

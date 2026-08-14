@@ -1,0 +1,1398 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="Vicky Wu">
+<title>ICCA 中介資料庫 Schema（介接規格）</title>
+</head>
+<body>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; }
+  img, svg { max-width: 100%; }
+
+  :root {
+    --paper: #F4F6F8;
+    --panel: #FFFFFF;
+    --panel-2: #EAEFF4;
+    --line: #D5DDE6;
+    --line-soft: #E4EAF0;
+    --ink: #121B24;
+    --ink-2: #4B5A69;
+    --ink-3: #7B8A99;
+    --spine: #294B63;
+    --ch-a: #0E8A62;
+    --ch-b: #1C6EA8;
+    --warn: #A9631A;
+    --crit: #AC3743;
+    --tint-a: rgba(14, 138, 98, 0.10);
+    --tint-b: rgba(28, 110, 168, 0.10);
+    --tint-warn: rgba(169, 99, 26, 0.09);
+    --tint-crit: rgba(172, 55, 67, 0.08);
+    --shadow: 0 1px 2px rgba(18, 27, 36, 0.05), 0 8px 24px -16px rgba(18, 27, 36, 0.35);
+
+    --sans: system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC", sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", "Noto Sans Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0C1218; --panel: #141C25; --panel-2: #1A232D;
+      --line: #28333E; --line-soft: #202A34;
+      --ink: #E3E9EF; --ink-2: #A1AEBB; --ink-3: #72808D;
+      --spine: #74A9CD; --ch-a: #33BE89; --ch-b: #59A8DC;
+      --warn: #D2924A; --crit: #DF6670;
+      --tint-a: rgba(51, 190, 137, 0.12);
+      --tint-b: rgba(89, 168, 220, 0.12);
+      --tint-warn: rgba(210, 146, 74, 0.11);
+      --tint-crit: rgba(223, 102, 112, 0.10);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -16px rgba(0, 0, 0, 0.8);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --paper: #F4F6F8; --panel: #FFFFFF; --panel-2: #EAEFF4;
+    --line: #D5DDE6; --line-soft: #E4EAF0;
+    --ink: #121B24; --ink-2: #4B5A69; --ink-3: #7B8A99;
+    --spine: #294B63; --ch-a: #0E8A62; --ch-b: #1C6EA8;
+    --warn: #A9631A; --crit: #AC3743;
+    --tint-a: rgba(14, 138, 98, 0.10);
+    --tint-b: rgba(28, 110, 168, 0.10);
+    --tint-warn: rgba(169, 99, 26, 0.09);
+    --tint-crit: rgba(172, 55, 67, 0.08);
+    --shadow: 0 1px 2px rgba(18, 27, 36, 0.05), 0 8px 24px -16px rgba(18, 27, 36, 0.35);
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0C1218; --panel: #141C25; --panel-2: #1A232D;
+    --line: #28333E; --line-soft: #202A34;
+    --ink: #E3E9EF; --ink-2: #A1AEBB; --ink-3: #72808D;
+    --spine: #74A9CD; --ch-a: #33BE89; --ch-b: #59A8DC;
+    --warn: #D2924A; --crit: #DF6670;
+    --tint-a: rgba(51, 190, 137, 0.12);
+    --tint-b: rgba(89, 168, 220, 0.12);
+    --tint-warn: rgba(210, 146, 74, 0.11);
+    --tint-crit: rgba(223, 102, 112, 0.10);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -16px rgba(0, 0, 0, 0.8);
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.66;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 60px) clamp(18px, 4vw, 40px) 96px;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(38px, 5vw, 60px);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0;
+  }
+
+  h1 {
+    font-size: clamp(26px, 4.2vw, 40px);
+    line-height: 1.16;
+    letter-spacing: -0.022em;
+    font-weight: 640;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h2 {
+    font-size: clamp(19px, 2.4vw, 24px);
+    line-height: 1.3;
+    letter-spacing: -0.014em;
+    font-weight: 620;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h3 { font-size: 15.5px; font-weight: 620; margin: 0; }
+
+  p { margin: 0; }
+  .lede { color: var(--ink-2); max-width: 65ch; font-size: 17px; }
+  .note { color: var(--ink-2); font-size: 14.5px; max-width: 84ch; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.87em;
+    background: var(--panel-2);
+    border: 1px solid var(--line-soft);
+    border-radius: 3px;
+    padding: 0.1em 0.36em;
+    white-space: nowrap;
+  }
+
+  section { display: flex; flex-direction: column; gap: 18px; }
+  .section-head { display: flex; flex-direction: column; gap: 9px; }
+
+  .num-title { display: flex; align-items: baseline; gap: 12px; }
+  .num-title .n {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ch, var(--ink-3));
+    font-variant-numeric: tabular-nums;
+    flex: none;
+  }
+
+  /* ---------- 標頭 ---------- */
+  header {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding-bottom: 22px;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .docmeta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px 24px;
+    font-size: 13.5px;
+  }
+  .docmeta div { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+  .docmeta dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .docmeta dd { margin: 0; color: var(--ink); }
+
+  /* ---------- 表格 ---------- */
+  .table-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    background: var(--panel);
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 15px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.field { font-family: var(--mono); font-size: 13px; white-space: nowrap; color: var(--ink); }
+  td.type { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+  td.nul { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+  td.nul.y { color: var(--warn); }
+  td.nul.n { color: var(--ink-3); }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* §1 共通約定：第一欄是短標籤，右欄內容多會把它擠成一行兩個字 */
+  .terms table { min-width: 660px; }
+  .terms th:first-child, .terms td:first-child { width: 17%; min-width: 132px; white-space: nowrap; }
+
+  /* §5 的情況表：第一欄是短句，太窄會被擠成一行兩三個字 */
+  .cases table { min-width: 800px; }
+  .cases th:first-child, .cases td:first-child { width: 21%; min-width: 155px; }
+  .cases th:nth-child(2), .cases td:nth-child(2) { width: 32%; }
+  .cases code { white-space: normal; }
+
+  /* ---------- 階段 ---------- */
+  .phases {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 14px;
+    margin: 0;
+  }
+  .phase {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--ch, var(--spine));
+    box-shadow: var(--shadow);
+    padding: 15px 17px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .phase.p1 { --ch: var(--ch-a); }
+  .phase.p2 { --ch: var(--ch-b); }
+  .phase.p3 { --ch: var(--ink-3); }
+  .phase .pnum {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ch, var(--ink-3));
+  }
+  .phase ul { padding-left: 0; list-style: none; gap: 0; border-top: 1px solid var(--line-soft); }
+  .phase li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line-soft);
+    font-size: 14.5px;
+    color: var(--ink);
+  }
+  .phase li:last-child { border-bottom: 0; }
+  .phase .st { font-family: var(--mono); font-size: 11px; text-align: right; color: var(--ink-3); flex: none; max-width: 50%; }
+  .phase .st.on { color: var(--ch-a); }
+  .phase .st.tbd { color: var(--warn); }
+
+  /* 資料範例：整列都是資料，等寬字、不換行，過寬就橫向捲動 */
+  .sample table { min-width: 900px; }
+  .sample td { font-family: var(--mono); font-size: 12.4px; white-space: nowrap; color: var(--ink); }
+  .sample td.audit { color: var(--ink-2); }
+  .sample td.nil { color: var(--ink-3); }
+  .sample tbody tr.hl td { background: var(--tint-b); }
+
+  /* ---------- 程式碼 ---------- */
+  pre {
+    margin: 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 15px 17px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.8px;
+    line-height: 1.62;
+    color: var(--ink);
+    tab-size: 2;
+  }
+  pre .k { color: var(--ch, var(--spine)); }
+  pre .s { color: var(--ink-2); }
+  pre .c { color: var(--ink-3); font-style: normal; }
+
+  /* ---------- 資料區塊 ---------- */
+  .dataset {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--ch);
+    box-shadow: var(--shadow);
+    padding: clamp(18px, 3vw, 26px);
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .dataset > .table-scroll, .dataset > pre { box-shadow: none; }
+
+  .ds-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+  .ds-head h2 { color: var(--ink); }
+  .ds-head .cadence {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ch);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--line-soft);
+    border: 1px solid var(--line-soft);
+  }
+  .facts div { background: var(--panel); padding: 11px 14px; display: flex; flex-direction: column; gap: 2px; }
+  .facts dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .facts dd { margin: 0; font-size: 14px; }
+
+  .sub-h {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0;
+  }
+  .block { display: flex; flex-direction: column; gap: 9px; }
+
+  /* ---------- 資料流 ---------- */
+  .flow {
+    display: grid;
+    grid-template-columns: 1fr minmax(96px, 0.5fr) 1.15fr minmax(96px, 0.5fr) 1fr;
+    align-items: stretch;
+    margin: 0;
+  }
+
+  .fnode {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--ch, var(--spine));
+    box-shadow: var(--shadow);
+    padding: 15px 17px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .fnode.src { --ch: var(--ch-a); }
+  .fnode.mid { --ch: var(--spine); }
+  .fnode.dst { --ch: var(--ch-b); }
+  .fnode p { font-size: 14px; color: var(--ink-2); }
+  .fnode .tag {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ch, var(--ink-3));
+  }
+  .fnode .tables {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink);
+    background: var(--panel-2);
+    border: 1px solid var(--line-soft);
+    padding: 7px 10px;
+    line-height: 1.8;
+  }
+  .fnode .own {
+    margin-top: auto;
+    padding-top: 9px;
+    border-top: 1px dashed var(--line);
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+  .fnode .own b { color: var(--ink); font-weight: 620; }
+
+  .farrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 0 12px;
+    text-align: center;
+  }
+  .farrow .lbl { font-size: 13px; font-weight: 620; color: var(--ink); }
+  .farrow .sub { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .farrow .line { position: relative; width: 100%; height: 2px; background: var(--spine); }
+  .farrow .line::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    border-left: 9px solid var(--spine);
+    border-top: 6px solid transparent;
+    border-bottom: 6px solid transparent;
+  }
+
+  /* 窄螢幕：整條流程轉成直的，箭頭跟著轉 90 度 */
+  @media (max-width: 900px) {
+    .flow { grid-template-columns: 1fr; }
+    .farrow { padding: 14px 0; }
+    .farrow .line { width: 2px; height: 30px; }
+    .farrow .line::after {
+      right: auto;
+      left: 50%;
+      top: auto;
+      bottom: 0;
+      transform: translateX(-50%);
+      border: 0;
+      border-top: 9px solid var(--spine);
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+    }
+  }
+
+  /* ---------- 提示框 ---------- */
+  .callout {
+    border-left: 3px solid var(--tone, var(--spine));
+    background: var(--tone-bg, var(--panel-2));
+    padding: 14px 17px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    font-size: 14.5px;
+    color: var(--ink-2);
+  }
+  .callout b { color: var(--ink); font-weight: 620; }
+  .callout.warn { --tone: var(--warn); --tone-bg: var(--tint-warn); }
+  .callout.crit { --tone: var(--crit); --tone-bg: var(--tint-crit); }
+
+  ul { margin: 0; padding-left: 19px; display: flex; flex-direction: column; gap: 7px; }
+  li { font-size: 14.5px; color: var(--ink-2); }
+  li b { color: var(--ink); font-weight: 620; }
+
+  /* ---------- 待確認 ---------- */
+  .ask {
+    border: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .ask-row {
+    display: grid;
+    grid-template-columns: 34px 1fr;
+    gap: 14px;
+    padding: 14px 17px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .ask-row:last-child { border-bottom: 0; }
+  .ask-row .q {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--warn);
+    font-variant-numeric: tabular-nums;
+  }
+  .ask-row h3 { font-size: 15px; margin-bottom: 3px; }
+  .ask-row p { font-size: 14px; color: var(--ink-2); }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.7;
+  }
+</style>
+
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">介接規格 · 中介資料庫</p>
+    <h1>ICCA 中介資料庫 Schema</h1>
+    <p class="lede">
+      醫院端定時把 Philips ICCA 的資料寫進<b>由醫院端建置與維護</b>的中介資料庫，廠商唯讀取用。<br>
+      生命徵象是<b>即時</b>的儀器量測（每 5 分鐘一批）；其他臨床資料為<b>非即時</b>的人工填寫，
+      同樣每 5 分鐘檢查一次，<b>有新增或修改的紀錄就寫入、沒有就不寫</b>，內容可能是事後補填或修改的。
+    </p>
+    <dl class="docmeta">
+      <div><dt>版本</dt><dd>v0.3（草案）</dd></div>
+      <div><dt>日期</dt><dd>2026-08-06</dd></div>
+      <div><dt>最後更新</dt><dd>2026-08-14</dd></div>
+      <div><dt>作者</dt><dd>Vicky Wu</dd></div>
+      <div><dt>資料來源</dt><dd>Philips ICCA</dd></div>
+      <div><dt>涵蓋範圍</dt><dd>成人加護病房</dd></div>
+      <div><dt>介接方式</dt><dd>唯讀帳號或 API（由醫院端決定）</dd></div>
+      <div><dt>主機</dt><dd>醫院端提供專用 Server</dd></div>
+      <div><dt>維護</dt><dd>醫院端</dd></div>
+    </dl>
+
+    <div class="callout warn">
+      <p><b>目前僅涵蓋成人加護病房</b>，不含兒醫、麻醉、健檢、產房、牙醫、OR、POR 等單位。</p>
+      <p><b>管路資料不走Portal</b>，<b>與Jesse確認後，說明此次管路需求與床頭卡內容不同,不能直接傳</b>。</p>
+    </div>
+  </header>
+
+  <!-- ================= 資料範圍的三個階段 ================= -->
+  <section>
+    <div class="section-head">
+      <h2>三個階段資料撈取</h2>
+      <p class="note">分階段納入。標「資料待確認」的項目屬非即時資料，內容與頻率尚未定案。</p>
+    </div>
+
+    <div class="phases">
+      <div class="phase p1">
+        <p class="pnum">階段一</p>
+        <h3>核心監測</h3>
+        <ul>
+          <li>生命徵象<span class="st on">即時 · 資料已確認</span></li>
+          <li>神經學狀態<span class="st tbd">非即時 · 資料已確認</span></li>
+          <li>呼吸器<span class="st tbd">非即時 · 資料已確認</span></li>
+          <li>Scoring<span class="st tbd">非即時 · 資料已確認</span></li>
+        </ul>
+      </div>
+
+      <div class="phase p2">
+        <p class="pnum">階段二</p>
+        <h3>輸液與管路</h3>
+        <ul>
+          <li>IO 進出量<span class="st tbd">非即時 · 資料已確認</span></li>
+          <li>管路<span class="st tbd">非即時 · 資料待確認</span></li>
+        </ul>
+      </div>
+
+      <div class="phase p3">
+        <p class="pnum">階段三</p>
+        <h3>治療與支持</h3>
+        <ul>
+          <li>藥物<span class="st tbd">非即時 · 資料確認中</span></li>
+          <li>營養<span class="st tbd">資料來自Portal</span></li>
+          <li>儀器<span class="st tbd">非即時 · 資料待確認</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="note">
+      本文 §2、§3 描述的兩張表是<b>階段一</b>的內容；階段二、三納入時以新增資料或新增欄位的方式進來，
+      既有欄位不變動。
+    </p>
+  </section>
+
+  <!-- ================= 0 權責 ================= -->
+  <section>
+    <div class="section-head">
+      <div class="num-title"><span class="n">00</span><h2>權責分工</h2></div>
+      <p class="note">
+        中介資料庫是<b>醫院端的資產</b>：<b>2026-08-06 與資訊室主任的會議中討論確認，由醫院端提供一台專用
+        Server</b> 來放這個資料庫，建置、寫入、備份、清理與保留期限都由醫院端負責，
+        廠商如何取用（唯讀帳號或 API）也由醫院端決定。
+        <b>廠商不需要準備任何主機或資料庫</b>。
+      </p>
+    </div>
+
+    <figure class="flow" aria-label="ICCA 到中介資料庫再到其他廠商的資料流">
+      <div class="fnode src">
+        <p class="tag">來源 · Philips</p>
+        <h3>Philips ICCA 資料庫</h3>
+        <p>院內既有的臨床資訊系統。</p>
+        <p class="own">系統與資料正確性：<b>Philips</b><br>撈取：<b>醫院端</b></p>
+      </div>
+
+      <div class="farrow">
+        <span class="lbl">排程拋轉</span>
+        <span class="line"></span>
+        <span class="sub">每天不間斷<br>每 5 分鐘一輪<br>兩張表同時撈</span>
+      </div>
+
+      <div class="fnode mid">
+        <p class="tag">中介 · 醫院端建置維護</p>
+        <h3>中介資料庫（MS SQL Server）</h3>
+        <p class="tables">dbo.CDSUnvalidatedData<br>dbo.CISData</p>
+        <p>跑在<b>醫院端提供的專用 Server</b> 上。每輪寫入該時段的資料；時間窗大於間隔，重複的靠鑰匙去重。</p>
+        <p class="own">主機、建置、備份、清理：<b>醫院端</b><br><b>保留期限由醫院端決定</b>（見 §6 Q2）</p>
+      </div>
+
+      <div class="farrow">
+        <span class="lbl">唯讀取用</span>
+        <span class="line"></span>
+        <span class="sub">唯讀帳號 或 API<br>由醫院端決定<br>走 API 時憑醫院端核發的 token</span>
+      </div>
+
+      <div class="fnode dst">
+        <p class="tag">讀取 · 廠商</p>
+        <h3>其他廠商系統（如研華）</h3>
+        <p>依醫院端指定的方式唯讀取用，自行保存水位線做增量讀取（見 §4）。</p>
+        <p class="own">存取控制：<b>醫院端自行開發</b>——走 API 時由醫院端核發 token，<b>依 token 在醫院端篩選可回傳的範圍</b><br>讀取與後續處理：<b>廠商</b></p>
+      </div>
+    </figure>
+
+    <p class="note">
+      醫院端只寫、廠商只讀，交界就是這兩張表；廠商拿不到中介資料庫以外的任何權限。
+      拋轉中斷時廠商會看到資料停止增加，核對方式見 §5。
+    </p>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>項目</th><th>負責方</th><th>說明</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>ICCA 來源系統</td>
+            <td><b>Philips</b></td>
+            <td>ICCA 本身的維護與資料正確性；醫院端只以唯讀帳號撈取</td>
+          </tr>
+          <tr>
+            <td>中介資料庫主機、執行個體</td>
+            <td><b>醫院端</b></td>
+            <td><b>2026-08-06 與資訊室主任會議討論確認，由醫院端提供一台專用 Server</b>；
+              建置、備份、修補、容量規劃都在醫院端，廠商不需準備主機</td>
+          </tr>
+          <tr>
+            <td>建表與索引</td>
+            <td><b>醫院端</b></td>
+            <td>DDL 見 §2、§3；醫院端 DBA 建立，其他廠商不需要任何 DDL 權限</td>
+          </tr>
+          <tr>
+            <td>寫入與排程</td>
+            <td><b>醫院端</b></td>
+            <td>每 5 分鐘一輪，兩張表同時撈，失敗自動於下一輪重試</td>
+          </tr>
+          <tr>
+            <td>舊資料清理</td>
+            <td><b>醫院端</b></td>
+            <td>依需求設定保留期限及排程（見 §6 Q2）</td>
+          </tr>
+          <tr>
+            <td>寫入中斷的偵測與告警</td>
+            <td><b>醫院端</b></td>
+            <td>服務日誌與資料落後監控都在醫院端；貴司要自行核對的方式見 §5</td>
+          </tr>
+          <tr>
+            <td>取用方式與帳號</td>
+            <td>醫院端<b>決定並核發</b></td>
+            <td>開唯讀帳號直接查表，或由醫院端提供 API（<b>token 由醫院端核發，並依 token 在醫院端篩選資料範圍</b>）；
+              廠商提供來源 IP 與需求，醫院端開通（見 §6 Q1）</td>
+          </tr>
+          <tr>
+            <td>讀取邏輯與後續處理</td>
+            <td><b>其他廠商</b></td>
+            <td>水位線的保存、資料的解讀與運用</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 1 共通約定 ================= -->
+  <section>
+    <div class="section-head">
+      <div class="num-title"><span class="n">01</span><h2>共通約定</h2></div>
+      <p class="note">兩張表共用以下規則。</p>
+    </div>
+
+    <div class="table-scroll terms">
+      <table>
+        <thead>
+          <tr><th>項目</th><th>約定</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>資料庫</td>
+            <td>Microsoft SQL Server，跑在<b>醫院端提供的專用 Server</b> 上（2026-08-06 會議確認，見 §0）。
+              兩張表在同一個資料庫、同一個 schema（預設 <code>dbo</code>）。
+              實際的伺服器位址、執行個體與資料庫名稱隨帳號一併核發（見 §6 Q1）。</td>
+          </tr>
+          <tr>
+            <td>存取方式<br><span style="font-family: var(--mono); font-size: 11px; color: var(--warn);">醫院端決定</span></td>
+            <td>
+              兩種做法<b>由醫院端擇一</b>，欄位定義與內容相同：
+              <ul style="margin-top: 6px;">
+                <li><b>唯讀帳號</b>——直接查表，只有這兩張表的 <code>SELECT</code> 權限。
+                  醫院端只寫不讀，建議查詢加 <code>WITH (NOLOCK)</code> 避開寫入當下的鎖。</li>
+                <li><b>醫院端提供 API</b>——廠商不直接連資料庫。
+                  存取控制走<b>醫院端核發的 token</b>，每次呼叫帶著它；
+                  <b>能拿到哪些資料由醫院端依 token 篩選後才回傳。</b></li>
+              </ul>
+            </td>
+          </tr>
+          <tr>
+            <td>編碼</td>
+            <td>文字欄位一律 <code>NVARCHAR</code>（Unicode），含中文標籤如「昏迷指數」。</td>
+          </tr>
+          <tr>
+            <td>時間欄位</td>
+            <td>
+              臨床時間（兩張表都叫 <code>chartTime</code>）型別是
+              <code>DATETIME</code>，<b>值是台灣時間（UTC+8），不帶時區標記</b>。<br>
+              稽核時間只有一欄 <code>insertedAt</code>，<b>值同樣是台灣時間（UTC+8）</b>——
+              它是資料庫伺服器蓋的 <code>SYSDATETIME()</code>。<b>全表只有一種時間基準</b>，
+              臨床時間與稽核時間可以直接相減。<br>
+              <b>沒有 <code>updatedAt</code>／<code>changedAt</code></b>：兩張表都只新增不更新（見下方「寫入節奏」），
+              列寫進去之後不會被動到，這兩欄不會有值可以放。
+            </td>
+          </tr>
+          <tr>
+            <td>空值</td>
+            <td>以 <code>NULL</code> 表示，不會用空字串。例外見 §2、§3 的鑰匙欄位說明。</td>
+          </tr>
+          <tr>
+            <td>寫入節奏</td>
+            <td>
+              <b>每 5 分鐘一輪，兩張表同時撈</b>；<b>該輪沒有新資料就不寫</b>，不會產生空批次。
+              一批是一個交易，<b>要嘛整批進去、要嘛整批沒有</b>，不會讀到寫到一半的狀態。<br>
+              <b>兩張表都是「只新增、不更新、不刪除」</b>：已經寫進去的列永遠不會被改動。
+              生命徵象是<b>即時</b>量測，來源本身就是只寫不改；臨床紀錄是<b>非即時</b>的人工填寫，
+              <code>chartTime</code> 可能遠早於寫入時間，也可能事後被護理師修改——
+              <b>被改過的紀錄會以新的一列進來，原本那一列原封不動留著</b>（見 §3）。
+            </td>
+          </tr>
+          <tr>
+            <td>資料量</td>
+            <td>
+              生命徵象約每批 1,800 列、每天 <b>50 萬列</b>上下，隨在床數浮動；
+              臨床紀錄目前遠小於此，但會隨納入的表單項目增加而成長（見下方「後續擴充」）。
+            </td>
+          </tr>
+          <tr>
+            <td>保留期限</td>
+            <td>
+              由醫院端排程清理，<b>期限依廠商需要而定</b>（見 §6 Q2）。
+              未確認之前不會刪除任何資料——但也請勿把本表當成長期歷史庫使用，
+              需要留存的資料請自行複製一份。
+            </td>
+          </tr>
+          <tr>
+            <td>後續擴充</td>
+            <td>
+              <b>生命徵象</b>的量測項目已固定，後續不會增加。<br>
+              <b>臨床紀錄</b>的表單項目則會持續納入新的類別，項目清單是開放式的。因此請以下列方式實作：
+              <ul style="margin-top: 6px;">
+                <li><b>不要用 <code>SELECT *</code></b>，明確列出需要的欄位——新增欄位時貴司才不會受影響。</li>
+                <li><b>不要假設 <code>terseLabel</code> / <code>interventionId</code> 的值域固定</b>，
+                  會隨時出現沒看過的值。</li>
+                <li>已定義欄位的名稱與型別不會變動，只會新增。</li>
+              </ul>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 2 生命徵象 ================= -->
+  <section style="--ch: var(--ch-a);">
+    <div class="section-head">
+      <div class="num-title"><span class="n">02</span><h2>資料表一：CDSUnvalidatedData</h2></div>
+    </div>
+
+    <div class="dataset">
+      <div class="ds-head">
+        <h2>dbo.CDSUnvalidatedData</h2>
+        <span class="cadence">每 5 分鐘寫入一批</span>
+      </div>
+
+      <dl class="facts">
+        <div><dt>時效</dt><dd><b>即時</b>（監視器量測）</dd></div>
+        <div><dt>寫入頻率</dt><dd>每 5 分鐘一輪，<b>有新資料才寫</b></dd></div>
+        <div><dt>每批涵蓋</dt><dd>寫入前約 6 分鐘</dd></div>
+        <div><dt>粒度</dt><dd>一列＝一位病人一項目一時間點</dd></div>
+        <div><dt>每日列數</dt><dd>約 50 萬</dd></div>
+      </dl>
+
+      <div class="block">
+        <p class="sub-h">結構</p>
+        <pre><span class="k">CREATE TABLE</span> dbo.CDSUnvalidatedData (
+  lifetimeNumber   <span class="k">NVARCHAR</span>(32)  <span class="k">NOT NULL</span>,   <span class="c">-- 唯一鍵</span>
+  terseLabel       <span class="k">NVARCHAR</span>(32)  <span class="k">NOT NULL</span>,   <span class="c">-- 唯一鍵</span>
+  propName         <span class="k">NVARCHAR</span>(64)  <span class="k">NOT NULL</span>,   <span class="c">-- 唯一鍵</span>
+  chartTime        <span class="k">DATETIME</span>  <span class="k">NOT NULL</span>,   <span class="c">-- 唯一鍵</span>
+  numericValue     <span class="k">FLOAT</span>         <span class="k">NULL</span>,
+  textValue        <span class="k">NVARCHAR</span>(256) <span class="k">NULL</span>,   <span class="c">-- 非數值的量測值</span>
+  storeTime        <span class="k">DATETIME</span>  <span class="k">NULL</span>,   <span class="c">-- 增量讀取的水位線</span>
+  insertedAt       <span class="k">DATETIME</span>  <span class="k">NOT NULL DEFAULT</span> (SYSDATETIME())
+  <span class="c">-- 上面四欄合起來是唯一鍵，四欄值都相同的資料只會有一列；</span>
+  <span class="c">-- 唯一性由醫院端的寫入流程保證，索引與條件約束不對外開放</span>
+);</pre>
+      </div>
+
+      <div class="block">
+        <p class="sub-h">欄位</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>欄位</th><th>型別</th><th>可為 NULL</th><th>說明</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="field">lifetimeNumber</td>
+                <td class="type">nvarchar(32)</td>
+                <td class="nul n">否</td>
+                <td>
+                  病歷號，唯一鍵的第一欄。<b>查不到病歷號的量測不會寫進本表</b>（見 §5），
+                  所以這一欄不會是 <code>NULL</code>。<b>床號不在本表</b>——同一床會換病人、
+                  同一位病人也會轉床，一律以病歷號認人。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">terseLabel</td>
+                <td class="type">nvarchar(32)</td>
+                <td class="nul n">否</td>
+                <td>量測項目，例如 <code>HR</code>、<code>ABP</code>、<code>SpO2</code>、<code>CVP</code>。</td>
+              </tr>
+              <tr>
+                <td class="field">propName</td>
+                <td class="type">nvarchar(64)</td>
+                <td class="nul n">否</td>
+                <td>
+                  細項，例如 <code>systolic</code>、<code>diastolic</code>、<code>mean</code>。
+                  單值項目（如 HR）是<b>空字串</b> <code>''</code>，不是 <code>NULL</code>——它是唯一鍵的一部分。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">chartTime</td>
+                <td class="type">datetime</td>
+                <td class="nul n">否</td>
+                <td>
+                  <b>臨床時間</b>：儀器量測到的那一刻（UTC+8）。臨床上以此為準，時序圖表請用這一欄。
+                  跟 <code>dbo.CISData</code> 的 <code>chartTime</code> 是同一個角色，所以同名；
+                  在 ICCA 來源端這一欄叫 <code>measurementTime</code>。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">numericValue</td>
+                <td class="type">float</td>
+                <td class="nul y">是</td>
+                <td>量測數值，可能含小數。單位由項目本身決定，不另設單位欄位。</td>
+              </tr>
+              <tr>
+                <td class="field">textValue</td>
+                <td class="type">nvarchar(256)</td>
+                <td class="nul y">是</td>
+                <td>
+                  <b>非數值的量測值</b>，例如儀器送出的模式、狀態或帶單位的字串。
+                  絕大多數項目是數值，這一欄為 <code>NULL</code>，值在 <code>numericValue</code>。<br>
+                  <b>兩欄請都讀。</b>判斷一列的值要先看 <code>numericValue</code>，是
+                  <code>NULL</code> 才看 <code>textValue</code>——不要假設每一列都有數值。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">storeTime</td>
+                <td class="type">datetime</td>
+                <td class="nul y">是</td>
+                <td>
+                  ICCA 端寫入的時間（UTC+8），通常略晚於 <code>chartTime</code> 數秒。
+                  <b>增量讀取請用這一欄當水位線</b>，見 §4。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">insertedAt</td>
+                <td class="type">datetime</td>
+                <td class="nul n">否</td>
+                <td>
+                  本列寫進中介資料庫的時間（<b>UTC+8</b>）。跟 <code>storeTime</code> 的差距就是
+                  這條管線的落後幅度，<b>核對拋轉有沒有斷掉請用這一欄</b>（見 §5）。
+                  <b>不要拿它當水位線</b>——同一批寫入的列時間戳相同。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="block">
+        <p class="sub-h">資料範例</p>
+        <div class="table-scroll sample">
+          <table>
+            <thead>
+              <tr>
+                <th>lifetimeNumber</th><th>terseLabel</th><th>propName</th><th>chartTime</th>
+                <th>numericValue</th><th>textValue</th><th>storeTime</th>
+                <th>insertedAt <span style="text-transform: none;">(UTC+8)</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>A123456</td><td>HR</td><td class="nil">''</td>
+                <td>2026-07-22 11:24:00</td><td>88</td><td class="nil">NULL</td><td>2026-07-22 11:24:05</td>
+                <td class="audit">2026-07-22 11:25:11.402</td>
+              </tr>
+              <tr class="hl">
+                <td>A123456</td><td>ABP</td><td>systolic</td>
+                <td>2026-07-22 11:24:00</td><td>118</td><td class="nil">NULL</td><td>2026-07-22 11:24:05</td>
+                <td class="audit">2026-07-22 11:25:11.402</td>
+              </tr>
+              <tr class="hl">
+                <td>A123456</td><td>ABP</td><td>diastolic</td>
+                <td>2026-07-22 11:24:00</td><td>78</td><td class="nil">NULL</td><td>2026-07-22 11:24:05</td>
+                <td class="audit">2026-07-22 11:25:11.402</td>
+              </tr>
+              <tr class="hl">
+                <td>A123456</td><td>ABP</td><td>mean</td>
+                <td>2026-07-22 11:24:00</td><td>91.3</td><td class="nil">NULL</td><td>2026-07-22 11:24:05</td>
+                <td class="audit">2026-07-22 11:25:11.402</td>
+              </tr>
+              <tr>
+                <td>A234567</td><td>SpO2</td><td>SpO2msmt</td>
+                <td>2026-07-22 11:24:00</td><td>97</td><td class="nil">NULL</td><td>2026-07-22 11:24:06</td>
+                <td class="audit">2026-07-22 11:25:11.402</td>
+              </tr>
+              <tr>
+                <td>A345678</td><td>CVP</td><td class="nil">''</td>
+                <td>2026-07-22 11:24:00</td><td>9</td><td class="nil">NULL</td><td>2026-07-22 11:24:07</td>
+                <td class="audit">2026-07-22 11:25:11.402</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          <b>底色那三列是同一次血壓量測</b>：<code>ABP</code> 靠 <code>propName</code>
+          分收縮／舒張／平均，所以是三列而不是一列；<code>HR</code> 這種單值項目的
+          <code>propName</code> 是空字串而不是 <code>NULL</code>。<br>
+          <b>沒有床號欄位</b>，病人一律以 <code>lifetimeNumber</code> 認；
+          查不到病歷號的量測整列不寫入（見 §5）。<br>
+          上表 <code>textValue</code> 全部是 <code>NULL</code>，因為這幾項都是數值型的量測；
+          非數值的項目則反過來，<code>numericValue</code> 是 <code>NULL</code>、值在 <code>textValue</code>。
+        </p>
+      </div>
+
+      <div class="callout">
+        <p><b>識別一個量測項目要用 <code>terseLabel</code> + <code>propName</code> 兩欄。</b>
+          單看 <code>ABP</code> 無法分辨是收縮壓、舒張壓還是平均動脈壓。</p>
+        <p><b>已降頻。</b>監視器可能每幾秒送出一次，醫院端已先篩選為「每位病人、每分鐘、每項目最新一筆」，
+          表中不會有秒級的原始資料。</p>
+        <p><b>只包含對得到病歷號的量測。</b>空床、測試中的儀器，以及病人對應系統暫時查不到病歷號的那一輪，都不會寫進來（見 §5）。</p>
+        <p><b>本表只有監視器送出的量測，不是「全部的生命徵象」。</b>
+          目前的項目是 HR、SpO2、ABP、CVP、NBP、PAP、ICP、PCWP。
+          <b>體溫不在這張表</b>——它是護理師填在表單上的，寫進
+          <code>dbo.CISData</code>（見 §3）。找不到某個項目時請先查對照清單，
+          不要用「它是生命徵象所以應該在這裡」推論。</p>
+        <p><b>本表的列寫進去之後不會再變，也不會被刪除。</b>來源的 CDS 是直接跑轉的環狀表，
+          只有寫入、沒有更新，所以本表沒有 <code>isDelete</code> 這類作廢註記，也沒有
+          <code>updatedAt</code>／<code>changedAt</code>。<b>同一組唯一鍵只會有一列</b>——
+          這一點跟 <code>dbo.CISData</code> 不同（見 §3）。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 3 神經評估或其他臨床資料 ================= -->
+  <section style="--ch: var(--ch-b);">
+    <div class="section-head">
+      <div class="num-title"><span class="n">03</span><h2>資料表二：神經評估或其他臨床資料</h2></div>
+      <p class="note">護理師填在表單上的紀錄都走這張表，項目不限於神經評估。</p>
+    </div>
+
+    <div class="dataset">
+      <div class="ds-head">
+        <h2>dbo.CISData</h2>
+        <span class="cadence">每 5 分鐘一輪 · 有新資料才寫</span>
+      </div>
+
+      <dl class="facts">
+        <div><dt>時效</dt><dd><b>非即時</b>（人工填寫）</dd></div>
+        <div><dt>寫入頻率</dt><dd>每 5 分鐘一輪，<b>有新資料才寫</b></dd></div>
+        <div><dt>每批涵蓋</dt><dd>寫入前約 6 分鐘</dd></div>
+        <div><dt>粒度</dt><dd>一列＝一位病人一項目一時間點的<b>一個版本</b></dd></div>
+        <div><dt>項目清單</dt><dd>開放式，將持續擴充</dd></div>
+      </dl>
+
+      <div class="callout warn">
+        <p><b>本表不只神經評估。</b>裝的是「護理師填在表單上的紀錄」，
+          依<b>資料來源</b>而不是臨床領域分表——所以呼吸照護與體溫也在這裡：</p>
+        <div class="table-scroll" style="margin-top: 4px;">
+          <table>
+            <thead><tr><th>領域</th><th>項目</th><th>項數</th></tr></thead>
+            <tbody>
+              <tr><td>神經評估</td><td>昏迷指數、瞳孔大小、四肢肌力</td><td class="num">6</td></tr>
+              <tr><td>鎮靜／譫妄</td><td>RASS 分數、ICDSC、疼痛指數</td><td class="num">3</td></tr>
+              <tr><td>呼吸照護</td><td>FiO2 %.、PaO2</td><td class="num">2</td></tr>
+              <tr><td>呼吸及檢驗紀錄表</td><td>FiO2 %、Ventilator Mode.</td><td class="num">2</td></tr>
+              <tr><td>生命徵象及治療紀錄-Scoring</td><td>APACH II、TISS、SOFA、UA/NSTEMI</td><td class="num">4</td></tr>
+              <tr><td>生命徵象</td><td>體溫(˚C)</td><td class="num">1</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><b>體溫請到本表找，不在 <code>dbo.CDSUnvalidatedData</code>。</b>
+          它是人工填寫而非儀器上傳，因此走這條管線。</p>
+      </div>
+
+      <div class="block">
+        <p class="sub-h">結構</p>
+        <pre><span class="k">CREATE TABLE</span> dbo.CISData (
+  interventionId  <span class="k">NVARCHAR</span>(36)   <span class="k">NOT NULL</span>,  <span class="c">-- 識別鍵</span>
+  chartTime       <span class="k">DATETIME</span>   <span class="k">NOT NULL</span>,  <span class="c">-- 識別鍵</span>
+  lifetimeNumber  <span class="k">NVARCHAR</span>(32)   <span class="k">NOT NULL</span>,
+  terseLabel      <span class="k">NVARCHAR</span>(32)  <span class="k">NULL</span>,
+  terseForm       <span class="k">NVARCHAR</span>(32)   <span class="k">NULL</span>,   <span class="c">-- 不含單位</span>
+  verboseForm     <span class="k">NVARCHAR</span>(256)  <span class="k">NULL</span>,   <span class="c">-- 含單位</span>
+  storeTime       <span class="k">DATETIME</span>   <span class="k">NULL</span>,   <span class="c">-- 增量讀取的水位線；也是版本的先後</span>
+  isDeleted       <span class="k">BIT</span>          <span class="k">NOT NULL DEFAULT</span> (0),
+  insertedAt      <span class="k">DATETIME</span>  <span class="k">NOT NULL DEFAULT</span> (SYSDATETIME())
+  <span class="c">-- 另有醫院端內部使用的病人識別欄位，與上列 interventionId、chartTime</span>
+  <span class="c">-- 共同構成識別鍵，不對外開放</span>
+  <span class="c">--</span>
+  <span class="c">-- 沒有主鍵：同一組識別鍵會有多列（紀錄的先後版本），見下方說明</span>
+);</pre>
+      </div>
+
+      <div class="block">
+        <p class="sub-h">欄位</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>欄位</th><th>型別</th><th>可為 NULL</th><th>說明</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="field">interventionId</td>
+                <td class="type">nvarchar(36)</td>
+                <td class="nul n">否</td>
+                <td>評估項目的識別碼（GUID）。<b>比 <code>terseLabel</code> 穩定</b>，對照表請以此為鍵。</td>
+              </tr>
+              <tr>
+                <td class="field">chartTime</td>
+                <td class="type">datetime</td>
+                <td class="nul n">否</td>
+                <td>這筆紀錄在臨床上代表的時間（UTC+8）。時序請用這一欄，不是寫入時間。</td>
+              </tr>
+              <tr>
+                <td class="field">lifetimeNumber</td>
+                <td class="type">nvarchar(32)</td>
+                <td class="nul n">否</td>
+                <td>
+                  病歷號。<b>查不到病歷號的紀錄不會寫進本表</b>（見 §5），所以不會是 <code>NULL</code>。
+                  
+                </td>
+              </tr>
+              <tr>
+                <td class="field">terseLabel</td>
+                <td class="type">nvarchar(32)</td>
+                <td class="nul y">是</td>
+                <td>項目名稱，例如「昏迷指數」、「RASS」、「體溫」。尚未建檔時為 <code>NULL</code>。</td>
+              </tr>
+              <tr>
+                <td class="field">terseForm</td>
+                <td class="type">nvarchar(32)</td>
+                <td class="nul y">是</td>
+                <td>
+                  實際填寫的值，<b>不含單位</b>，例如 <code>E4V5M6</code>、<code>37.2腋溫</code>、<code>-2</code>。
+                  是文字不是數值，要算數值請自行轉型。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">verboseForm</td>
+                <td class="type">nvarchar(256)</td>
+                <td class="nul y">是</td>
+                <td>
+                  同一筆填寫值的<b>完整版本，含單位</b>，例如 <code>37.2腋溫</code>、<code>40 %</code>。
+                  來源沒有提供時為 <code>NULL</code>。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">storeTime</td>
+                <td class="type">datetime</td>
+                <td class="nul y">是</td>
+                <td>
+                  ICCA 端最後寫入的時間（UTC+8）。紀錄被修改時這一欄會變新，
+                  所以<b>同一組識別鍵底下 <code>storeTime</code> 最大的那一列就是現行版本</b>。
+                  <b>增量讀取也用這一欄當水位線</b>，見 §4。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">isDeleted</td>
+                <td class="type">bit</td>
+                <td class="nul n">否</td>
+                <td>
+                  <b>作廢註記</b>。<code>0</code> ＝ 有效、<code>1</code> ＝ 這筆在 ICCA 已經被刪除或作廢。
+                  醫院端<b>不會實際刪除列、也不會去改既有的列</b>：作廢是<b>再寫一列</b>
+                  同樣識別鍵、<code>isDeleted = 1</code>、<code>storeTime</code> 更新的紀錄。
+                  因此判斷一筆現在是不是有效，要看<b>最新那一列</b>的 <code>isDeleted</code>，
+                  不是看有沒有 <code>isDeleted = 1</code> 的列存在（見 §4 的範例）。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">insertedAt</td>
+                <td class="type">datetime</td>
+                <td class="nul n">否</td>
+                <td>
+                  本列寫進中介資料庫的時間（<b>UTC+8</b>）。列寫進去就不會再變，所以沒有
+                  <code>updatedAt</code>。<b>不要拿它當水位線</b>——同一批寫入的列時間戳相同；
+                  它是用來核對拋轉有沒有斷掉的（見 §5）。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="block">
+        <p class="sub-h">資料範例</p>
+        <div class="table-scroll sample">
+          <table>
+            <thead>
+              <tr>
+                <th>interventionId</th><th>chartTime</th>
+                <th>lifetimeNumber</th><th>terseLabel</th><th>terseForm</th><th>verboseForm</th>
+                <th>storeTime</th><th>isDeleted</th>
+                <th>insertedAt <span style="text-transform: none;">(UTC+8)</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="hl">
+                <td>9B1DEB4D…0C0F</td><td>2026-07-31 11:20:00</td>
+                <td>A123456</td><td>昏迷指數</td><td>E4V5M6</td><td>E4V5M6</td>
+                <td>2026-07-31 11:24:03</td><td>0</td>
+                <td class="audit">2026-07-31 11:25:07.118</td>
+              </tr>
+              <tr class="hl">
+                <td>9B1DEB4D…0C0F</td><td>2026-07-31 11:20:00</td>
+                <td>A123456</td><td>昏迷指數</td><td>E3V4M6</td><td>E3V4M6</td>
+                <td>2026-07-31 12:05:12</td><td>0</td>
+                <td class="audit">2026-07-31 12:05:41.900</td>
+              </tr>
+              <tr>
+                <td>6F9619FF…D011</td><td>2026-07-31 11:20:00</td>
+                <td>A123456</td><td>RASS 鎮靜程度評估表</td><td>-2 輕度鎮靜</td><td>-2 輕度鎮靜</td>
+                <td>2026-07-31 11:24:03</td><td>0</td>
+                <td class="audit">2026-07-31 11:25:07.118</td>
+              </tr>
+              <tr>
+                <td>A0EEBC99…6655</td><td>2026-07-31 11:00:00</td>
+                <td>A123456</td><td>體溫(˚C)</td><td>37.2腋溫</td><td>37.2腋溫</td>
+                <td>2026-07-31 11:06:08</td><td>0</td>
+                <td class="audit">2026-07-31 11:25:07.118</td>
+              </tr>
+              <tr>
+                <td>1B4E28BA…B18D</td><td>2026-07-31 11:00:00</td>
+                <td>A123456</td><td>FiO2 %.</td><td>40</td><td>40 %</td>
+                <td>2026-07-31 11:06:08</td><td>0</td>
+                <td class="audit">2026-07-31 11:25:07.118</td>
+              </tr>
+              <tr>
+                <td>9B1DEB4D…0C0F</td><td>2026-07-31 11:00:00</td>
+                <td>A234567</td><td>昏迷指數</td><td>E1VTM4</td><td>E1VTM4</td>
+                <td>2026-07-31 11:12:04</td><td>0</td>
+                <td class="audit">2026-07-31 11:25:07.118</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          <b>底色那兩列是同一筆紀錄的先後版本</b>：11:20 那一筆昏迷指數原本填 <code>E4V5M6</code>，
+          12:05 被護理師改成 <code>E3V4M6</code>。<code>interventionId</code> 與 <code>chartTime</code>
+          完全相同，<b>原本那一列原封不動留著</b>，新版本是<b>另外多一列</b>，
+          靠 <code>storeTime</code> 分先後——<b>請以 append 處理，不要做 upsert</b>。
+          要現值就取同一組識別鍵裡 <code>storeTime</code> 最大的那一列（寫法見 §4）。<br>
+          第 4、5 列是體溫與 FiO2，<b>不是神經評估但一樣在本表</b>；最後一列是另一位病人的同一個項目
+          （同 <code>interventionId</code>、不同 <code>lifetimeNumber</code>）。<br>
+          <code>terseForm</code> 是<b>不含單位</b>的值、<code>verboseForm</code> 通常是<b>含單位</b>的完整版本。
+        </p>
+      </div>
+
+      <div class="callout warn">
+        <p><b>評估項目是開放清單，請勿寫死。</b>目前的項目（昏迷指數、RASS、ICDSC、FiO2、PaO2、體溫）
+          只是起點，後續會持續納入新的評估類別，<code>terseLabel</code> 與
+          <code>interventionId</code> 都會出現沒看過的值。</p>
+
+      </div>
+
+      <div class="callout crit">
+        <p><b>本表的列永遠不會被就地更新。</b>護理師可以回頭修改已經填過的紀錄，但醫院端
+          <b>不會去改既有的列</b>——改過的內容是以<b>新的一列</b>寫進來，舊的那一列原封不動留著。
+          作廢（<code>isDeleted = 1</code>）同理，也是多一列。</p>
+        <p><b>因此同一組識別鍵（病人識別欄位 + <code>interventionId</code> + <code>chartTime</code>）
+          底下會有多列。</b></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 4 增量讀取 ================= -->
+  <section>
+    <div class="section-head">
+      <div class="num-title"><span class="n">04</span><h2>怎麼只讀新的資料</h2></div>
+      <p class="note">
+        兩張表都是<b>只新增</b>的：已經寫進去的列不會被改、也不會被刪，醫院端也不搬移資料，
+        所以表會一直長大。貴司若要定時同步，請用 <code>storeTime</code> 當水位線（watermark）。
+      </p>
+    </div>
+
+    <div class="block">
+      <p class="sub-h">建議寫法：生命徵象</p>
+      <pre><span class="c">-- @last = 上一次同步時記下的水位線（第一次跑給一個很早的時間）</span>
+<span class="k">SELECT</span> lifetimeNumber, terseLabel, propName,
+       numericValue, textValue, chartTime, storeTime
+<span class="k">FROM</span>   dbo.CDSUnvalidatedData <span class="k">WITH</span> (NOLOCK)
+<span class="k">WHERE</span>  storeTime &gt; @last
+<span class="k">ORDER BY</span> storeTime, lifetimeNumber, terseLabel, propName, chartTime;
+
+<span class="c">-- 這一輪讀到的最大 storeTime 就是下一次的 @last</span></pre>
+      <p class="note">
+        本表同一組唯一鍵只會有一列，讀到什麼就是什麼，不必再挑版本。
+      </p>
+    </div>
+
+    <div class="block">
+      <p class="sub-h">建議寫法：臨床紀錄（要現值就要挑版本）</p>
+      <pre><span class="c">-- 同一組識別鍵底下可能有多列（先後版本），取最新那一列</span>
+<span class="k">WITH</span> inc <span class="k">AS</span> (
+  <span class="k">SELECT</span> interventionId, chartTime, lifetimeNumber, terseLabel,
+         terseForm, verboseForm, storeTime, isDeleted,
+         ROW_NUMBER() <span class="k">OVER</span> (
+           <span class="k">PARTITION BY</span> lifetimeNumber, interventionId, chartTime
+           <span class="k">ORDER BY</span> storeTime <span class="k">DESC</span>
+         ) <span class="k">AS</span> rn
+  <span class="k">FROM</span>   dbo.CISData <span class="k">WITH</span> (NOLOCK)
+  <span class="k">WHERE</span>  storeTime &gt; @last
+)
+<span class="k">SELECT</span> * <span class="k">FROM</span> inc
+<span class="k">WHERE</span>  rn = 1               <span class="c">-- 這一批裡每組識別鍵只留最新的那一版</span>
+<span class="k">ORDER BY</span> storeTime, interventionId, chartTime;</pre>
+      <p class="note">
+        <b>注意這只在「這一批」裡挑最新。</b>如果上一批已經寫過同一組識別鍵的舊版本，
+        貴司自己那一份要用<b>識別鍵 + <code>storeTime</code> 比較新才覆蓋</b>的方式更新，
+        否則跨批次時舊版本可能蓋掉新版本。
+      </p>
+    </div>
+
+    <div class="callout">
+      <p><b>兩張表都沒有流水號欄位。</b>水位線一律用 <code>storeTime</code>，它是 ICCA 端的寫入時間：
+        生命徵象是儀器上傳的時間，臨床紀錄被修改時也會跟著變新，所以新資料與新版本都追得到。</p>
+      <p><b>為什麼不是用 <code>chartTime</code>。</b>
+        那是臨床時間，不是寫入時間。護理師 12:05 補填 11:00 的紀錄時 <code>chartTime</code> 是 11:00，
+        以臨床時間當水位線會直接漏掉。</p>
+      <p><b>為什麼不是用 <code>insertedAt</code>。</b>它是中介庫的寫入時間，同一批寫進來的列
+        時間戳完全相同，當水位線會在批次邊界重複讀或漏讀。它的用途是核對拋轉有沒有斷（見 §5）。</p>
+    </div>
+
+    <div class="callout warn">
+      <p><b><code>dbo.CISData</code> 的作廢是「多一列」，不是改既有的列、也不是刪列。</b>
+        某筆被作廢時，會出現同樣識別鍵、<code>isDeleted = 1</code>、<code>storeTime</code> 更新的一列，
+        原本 <code>isDeleted = 0</code> 的那一列留著。<br>
+        所以增量查詢<b>不要</b>加 <code>isDeleted = 0</code>——那樣會讀不到「這筆被作廢了」這個變化。
+        請照上面的寫法整批讀進來、挑出每組識別鍵最新的那一列，<b>再看那一列的 <code>isDeleted</code></b>
+        決定是更新還是作廢自己那一份。對外呈現資料時才過濾。<br>
+        <code>dbo.CDSUnvalidatedData</code> <b>沒有這一欄</b>：來源的 CDS 只寫不改，儀器讀值不會被作廢。</p>
+    </div>
+
+    <div class="callout warn">
+      <p><b>水位線請用「已讀到的最大 <code>storeTime</code>」，並用 <code>&gt;</code> 而不是 <code>&gt;=</code>。</b>
+        同一秒內可能有多列，<code>ORDER BY</code> 再帶上識別鍵的欄位可確保順序穩定。</p>
+      <p><b>補撈的資料可能落在水位線後面。</b><code>storeTime</code> 是<b>來源</b>的時間戳，
+        醫院端補撈歷史資料時會寫進一批 <code>storeTime</code> 很舊的列，貴司的水位線早就越過那個點了，
+        <b>那一批不會被增量查詢讀到</b>。醫院端補撈後會通知，屆時請把該段時間範圍整段重讀
+        （<code>WHERE storeTime BETWEEN @from AND @to</code>）。</p>
+    </div>
+
+    <div class="block">
+      <p class="sub-h">重複與版本：醫院端怎麼處理</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>資料表</th><th>識別鍵</th><th>同一組識別鍵再次出現時</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CDSUnvalidatedData</td>
+              <td class="field">lifetimeNumber + terseLabel + propName + chartTime</td>
+              <td>
+                <b>不會再寫一列。</b>來源的 CDS 只寫不改，同一筆量測的內容不會變，
+                時間窗重疊而重複撈到的部分在寫入前就被擋掉了。<b>一組識別鍵永遠只有一列。</b>
+              </td>
+            </tr>
+            <tr>
+              <td>CISData</td>
+              <td class="field">病人識別欄位（醫院端內部使用）+ interventionId + chartTime</td>
+              <td>
+                內容<b>一模一樣</b>就不寫；內容<b>真的變了</b>（護理師改過、或被作廢）就
+                <b>多一列</b>，舊的那一列原封不動留著。<b>一組識別鍵可能有多列</b>，
+                以 <code>storeTime</code> 分先後。
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 5 異常情況 ================= -->
+  <section>
+    <div class="section-head">
+      <div class="num-title"><span class="n">05</span><h2>需要預期的情況</h2></div>
+      <p class="note">以下都是正常運作下會出現的狀況，請勿視為資料錯誤。</p>
+    </div>
+
+    <div class="table-scroll cases">
+      <table>
+        <thead>
+          <tr><th>情況</th><th>表上的表現</th><th>建議處理</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>該時段確實沒有資料</td>
+            <td>那段時間沒有新的列</td>
+            <td>正常，這不是故障</td>
+          </tr>
+          <tr>
+            <td>病人資料暫時查不到</td>
+            <td>那一輪的量測<b>整列不寫入</b>，表上就是少了那段時間的資料</td>
+            <td>
+              約定是<b>認不出是誰的資料不進表</b>——沒有病歷號的列不會出現，也不會用床號代替。
+              病人對應恢復之後的輪次會照常寫入，但<b>中斷期間的量測不會回頭補</b>（環狀表只留約 26 小時）
+            </td>
+          </tr>
+          <tr>
+            <td>項目標籤尚未建檔</td>
+            <td><code>terseLabel</code> 為 <code>NULL</code>，<code>interventionId</code> 正常</td>
+            <td>保留原始值並回報醫院端補上對照，不要丟棄整列</td>
+          </tr>
+          <tr>
+            <td>部分加護單位查詢失敗</td>
+            <td>該單位的病人這一輪沒有新列，其餘照常寫入</td>
+            <td>缺漏會在後續輪次補回，不必特別處理</td>
+          </tr>
+          <tr>
+            <td>紀錄被護理師修改</td>
+            <td><code>dbo.CISData</code> <b>多一列</b>：同樣識別鍵、<code>storeTime</code> 更新，
+              舊的那一列原封不動留著</td>
+            <td>取同一組識別鍵裡 <code>storeTime</code> 最大的那一列當現值，見 §4 的範例 SQL</td>
+          </tr>
+          <tr>
+            <td>紀錄在 ICCA 被刪除或作廢</td>
+            <td><code>dbo.CISData</code> <b>多一列</b>：同樣識別鍵、<code>isDeleted = 1</code>、
+              <code>storeTime</code> 更新；原本 <code>isDeleted = 0</code> 的列留著</td>
+            <td>一樣取最新那一列，看它的 <code>isDeleted</code> 決定要不要把自己那一份標成作廢；
+              <b>不要</b>在增量查詢裡就過濾掉 <code>isDeleted = 1</code></td>
+          </tr>
+          <tr>
+            <td>醫院端補撈歷史資料</td>
+            <td>寫進一批 <code>storeTime</code> 很舊的列，<b>落在貴司水位線後面</b></td>
+            <td>這批不會被增量查詢讀到。醫院端補撈後會通知，請把該段時間範圍整段重讀
+              （<code>WHERE storeTime BETWEEN @from AND @to</code>），見 §4</td>
+          </tr>
+          <tr>
+            <td>整段時間完全沒有新列</td>
+            <td>醫院端可能已經斷線，也可能真的沒資料——<b>表上分不出來</b></td>
+            <td>
+              醫院端有服務日誌與落後告警，會主動處理。貴司若要自行核對，用
+              <code>SELECT DATEDIFF(MINUTE, MAX(insertedAt), SYSDATETIME()) FROM dbo.CDSUnvalidatedData</code>，
+              超過 15 分鐘即為異常
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 6 待確認 ================= -->
+  <section>
+    <div class="section-head">
+      <div class="num-title"><span class="n">06</span><h2>需要確認的事項</h2></div>
+      <p class="note">
+        主機、資料庫的建置、寫入與維運都在醫院端——<b>專用 Server 已於 2026-08-06 與資訊室主任的會議中確認由醫院端提供</b>，
+        廠商不需要準備硬體。以下三項確認後即可開通；時間格式已定案，見 §1。
+      </p>
+    </div>
+
+    <div class="ask">
+      <div class="ask-row">
+        <span class="q">Q1</span>
+        <div>
+          <h3>取用方式與帳號</h3>
+          <p><b>要開唯讀帳號直接查表、還是走醫院端提供的 API，由醫院端決定。</b>
+          <p style="margin-top: 7px;">採 API 時，<b>token 由醫院端核發</b>，
+          <b>可取用的資料範圍在醫院端依 token 篩選後才回傳</b>
+          
+        </div>
+      </div>
+      <div class="ask-row">
+        <span class="q">Q2</span>
+        <div>
+          <h3>資料要保留多久</h3>
+          <p>每天約 50 萬列。醫院端會依貴司需要的期限設定清理排程（例如「保留 7 天」）。</p>
+          <p style="margin-top: 7px;">若貴司會把資料完整複製一份到自己的系統，這裡可以設得短一些
+            （例如3天），中介庫就只當緩衝用。</p>
+        </div>
+      </div>
+      <div class="ask-row">
+        <span class="q">Q3</span>
+        <div>
+          <h3>表結構確認</h3>
+          <p>請確認可接受 §2、§3 的表名、欄位名稱與型別。若貴司已有既定的命名慣例，
+            <b>現在調整成本最低</b>；一旦開始寫入就要考慮既有資料的搬移。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>ICCA → 中介資料庫（醫院端維護）· dbo.CDSUnvalidatedData / dbo.CISData · 建表腳本見 sql/sink-schema.sql</footer>
+
+</div>
+</body>
+</html>

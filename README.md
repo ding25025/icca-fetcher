@@ -5,13 +5,18 @@
 | 工具 | 撈什麼 | 資料來源 | 備註 |
 |---|---|---|---|
 | [`vitals.js`](vitals.js) | 生命徵象（HR、SpO2、動脈壓、CVP…） | CDS 的 26 張環狀表 ＋ 非週期表 | 實務上主要用的那支 |
-| [`neuro.js`](neuro.js) | 神經評估、RASS、ICDSC、FiO2、PaO2、體溫 | primary ＋ 各 CISChartingDB 分片 | 每小時撈有異動的病歷紀錄 |
+| [`neuro.js`](neuro.js) | 神經評估、RASS、ICDSC、FiO2、PaO2、體溫 | primary ＋ 各 CISChartingDB 分片 | 每 5 分鐘撈有異動的病歷紀錄 |
 | [`ring.js`](ring.js) | 環狀表定位與原始查詢 | CDS | `vitals.js` 的底層，也能單獨用 |
-| [`server.js`](server.js) | 把 `ring.js` 包成常駐 HTTP 服務 | 同上 | 給 Rhapsody 定時呼叫，另見 [SERVER.md](SERVER.md) |
+| [`sink.js`](sink.js) | 把撈到的資料寫進中介資料庫（SQL Server） | — | 設定 `sink` 之後就不落 JSON 檔了 |
+| [`server.js`](server.js) | 把 `ring.js` / `vitals.js` / `neuro.js` 包成常駐 HTTP 服務 | 同上 | 可自己定時撈並寫入，另見 [SERVER.md](SERVER.md) |
 | [`index.js`](index.js) | 多資料庫平行跑自訂 SQL | 任意 | 通用底座 |
 
 `vitals.js` 走**儀器資料**（機器自己送的數值），`neuro.js` 走**病歷紀錄**（護理師打進表單的），
 兩者的資料來源與定位方式完全不同，不會互相取代。
+
+輸出有兩條路，由設定檔的 `sink` 區塊決定：沒設就是**產 JSON 檔**（原本的行為），
+設了就**直接寫進中介資料庫**，中間不落檔、不轉格式——見
+[直接寫進中介資料庫（sink.js）](#直接寫進中介資料庫sinkjs)。
 
 ---
 
@@ -229,6 +234,10 @@ node vitals.js --discover        # parameterId 改由 primary 動態查
 
 ## 輸出
 
+> 設定檔有 `sink` 區塊且 `enabled` 時，這一整節就不適用了——資料直接寫進中介資料庫，
+> 不產 JSON 檔。見[直接寫進中介資料庫（sink.js）](#直接寫進中介資料庫sinkjs)。
+> 下面講的是沒設 `sink`（或加了 `--no-db`）時的行為。
+
 檔名預設是 **`vitals_yyyyMMddHHmm.json`**（到分鐘，例如 `vitals_202607231111.json`），
 所以排程每次跑出來的結果不會互相覆蓋。時間戳用的時區跟檔案內容一致（預設 +8），
 在 UTC 的機器上跑也不會差 8 小時。
@@ -254,7 +263,7 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
         "terseLabel": "ABP",
         "propName": "systolic",
         "numericValue": 118,
-        "measurementTime": "2026-07-22 11:24:00",
+        "chartTime": "2026-07-22 11:24:00",
         "storeTime": "2026-07-22 11:24:05"
       }
     ]
@@ -267,7 +276,8 @@ node vitals.js -o latest.json       # 沒有 {ts} 就是固定檔名，每次覆
 | `bed` | 床號（`UdsBed.label`），也是分組的鍵與接病人資料的鑰匙 |
 | `lifetimeNumber` | primary，用**床號**對上（見下節）。`--no-patients` 時這欄不出現 |
 | `terseLabel` / `propName` | parameterId 清單。`ABP` + `systolic` 才分得出是收縮壓 |
-| `measurementTime` / `storeTime` | 已換算成本地時間（+8）；`--utc` 保留 DB 原始 UTC |
+| `numericValue` / `textValue` | 量測值。非數值的項目（模式、狀態字串）值在 `textValue`，**是 null 就不輸出這一欄** |
+| `chartTime` / `storeTime` | 已換算成本地時間（+8）；`--utc` 保留 DB 原始 UTC。`chartTime` 是**臨床量測時間**，ICCA 來源端叫 `measurementTime`，撈的時候就改名了——跟 `neuro.js` 和中介庫同名同角色 |
 
 分組的鍵是**床號不是病歷號**：`--no-patients` 時沒有病歷號，primary 連不上時病歷號會整排
 是 null（這時刻意不濾掉，不然一次故障就變成空檔案），用病歷號當鍵這兩種情況都會把不同的床
@@ -505,7 +515,7 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 台灣看到的「差 8 小時」就是這麼來的。
 
 `vitals.js` 的時間窗直接用 **DB 端的 `GETUTCDATE()`** 計算，完全不碰用戶端時鐘，所以不管執行
-機器在哪個時區都不會算錯。輸出的 `measurementTime` / `storeTime` 已經換算成本地時間
+機器在哪個時區都不會算錯。輸出的 `chartTime`（來源的 `measurementTime`）／ `storeTime` 已經換算成本地時間
 （`2026-07-22 11:24:00`，預設 +8，可用 `displayTimezoneOffsetHours` 調整）；
 要保留 DB 原始的 UTC 值就加 `--utc`。
 
@@ -514,7 +524,7 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 # 神經評估抓取工具（neuro.js）
 
 跟 `vitals.js` 是姊妹功能，但走的是**病歷紀錄**（護理師打進表單的）而非儀器資料，
-管線完全不同。預設每小時跑一次，只撈「近一小時有異動」的紀錄。
+管線完全不同。跟 vitals 一樣每 5 分鐘跑一輪，只撈「時間窗內有異動」的紀錄，有新資料才寫。
 
 ## 跟 vitals.js 差在哪
 
@@ -524,8 +534,8 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 | 來源表 | CDS 的 `UnvalidatedDevice*Data` | 各 charting 分片的 `PtIntervention` |
 | 怎麼定位 | 26 張環狀表，先找寫入頭 | 照 `HostDb` 分片，不掃表 |
 | 對應鑰匙 | **床號**（`UdsBed.label` 對 `Bed.displayLabel`） | **`ptEncounterId`**（病人主鍵） |
-| 「新資料」的定義 | `measurementTime` 落在時間窗 | `storeTime` 落在時間窗（有異動才撈） |
-| 預設時間窗 | 5 分鐘 | 60 分鐘 |
+| 「新資料」的定義 | 量測時間（來源的 `measurementTime`，輸出叫 `chartTime`）落在時間窗 | `storeTime` 落在時間窗（有異動才撈） |
+| 預設時間窗 | 5 分鐘 | 6 分鐘（5 分鐘一輪多留 1 分鐘） |
 
 ## 三段查詢
 
@@ -564,7 +574,7 @@ charting 分片的連線沿用 primary 的帳密與 `options`，只換 `server` 
 ## 執行
 
 ```bash
-node neuro.js --pretty            # 撈近 60 分鐘有異動的
+node neuro.js --pretty            # 撈近 6 分鐘有異動的
 node neuro.js -w 120              # 改抓近 120 分鐘
 node neuro.js --utc               # 時間保留 DB 原始的 UTC（預設已 +8）
 node neuro.js --ids-file my.txt   # 用自己的 interventionId 清單，跳過第 1 段查詢
@@ -574,6 +584,9 @@ node neuro.js --help              # 全部選項
 ```
 
 ## 輸出
+
+設定檔有 `sink` 區塊時直接寫進 `CISData`（見[上面那一節](#直接寫進中介資料庫sinkjs)），
+以下是不寫資料庫時的 JSON 格式。
 
 檔名預設 `neuro_{ts}.json`（到分鐘）。**一位病人一筆**，紀錄收在 `records[]` 裡，
 依床號自然排序（`ICU-10` 在 `ICU-2` 之後，沒床的排最後）：
@@ -626,6 +639,193 @@ node neuro.js --help              # 全部選項
 `encounterChunk` 是一次 `IN` 幾個 `ptEncounterId`——整個加護病房的病人一次塞進去會超過
 SQL Server 單次請求 2100 個參數的上限，所以切塊查再合併。注意每一塊都要重帶一次完整的
 `interventionId` 清單，兩者相加才是實際的參數量。
+
+---
+
+# 直接寫進中介資料庫（sink.js）
+
+撈完之後不落 JSON 檔，直接把資料寫進**中介資料庫**（另一台 SQL Server），下游從那兩張表讀。
+設定放在**自己的檔案 `sink.config.json`**（複製 [sink.config.example.json](sink.config.example.json) 來改），
+`vitals.js`、`neuro.js`、`server.js` 三邊共用同一份。
+
+**為什麼不寫在 `databases.config.json`**：那個檔的 `databases[]` 是**資料來源**清單，
+`vitals.js` 會照資料庫名稱自動分類（`CDSUnvalidatedData*` 當 CDS、其餘當 primary），
+中介庫放進去會被當成一台 primary。兩者角色相反——一個是撈、一個是寫，分開放。
+（舊寫法：`databases.config.json` 裡的 `"sink"` 區塊仍然讀得到，但 `sink.config.json` 優先。）
+
+**中介資料庫由院方維護**——主機、建表、備份、清理、寫入監控全在我們這邊，下游只拿唯讀帳號。
+所以改表結構不必跟外部協調，`ensureTables` 也可以放心開著；相對地，**沒有別人會來收舊資料**，
+保留期限一天沒定，表就一天在長。
+
+> **給下游看的完整介接規格在 [docs/interim-db-schema.html](docs/interim-db-schema.html)**——
+> 權責分工、表結構、每個欄位的意義、時區約定、怎麼增量讀取、要預期哪些狀況。
+> 下面是給自己人看的操作說明。
+
+`sink.config.json`（含明文密碼，已在 `.gitignore`）：
+
+```json
+{
+  "enabled": true,
+  "connection": {
+    "server": "10.0.0.50", "port": 1433, "database": "ICU_DW",
+    "user": "sa", "password": "env:SINK_PASSWORD",
+    "options": { "encrypt": false, "trustServerCertificate": true }
+  }
+}
+```
+
+換檔名用環境變數 `SINK_CONFIG`，或加 `--sink-config <檔案>`（`sink.js` 與 `vitals.js` 都吃）。
+
+```bash
+node sink.js --ddl      # 印出建表 SQL（就是 sql/sink-schema.sql 的內容）
+node sink.js --init     # 直接連線建表，缺什麼建什麼，已存在的不動
+node sink.js --check    # 兩張表在不在、目前幾筆、最新一筆是什麼時候
+node vitals.js          # enabled 之後就直接寫進去，不再產 JSON 檔
+node vitals.js --no-db  # 這一次不要寫，改回落檔（排錯時好用）
+node neuro.js --to-db   # 反過來：設定沒開，這一次臨時寫進去
+```
+
+## 兩張表
+
+一支工具一張表，**一筆紀錄一列**——JSON 裡的 `records[]` 攤平，床號與病歷號跟著每一列走。
+完整 DDL 在 [sql/sink-schema.sql](sql/sink-schema.sql)（由 `node sink.js --ddl` 產生）。
+
+**`CDSUnvalidatedData`**（生命徵象）——**只新增，不更新**，欄位與型別照介接規格 §2
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `lifetimeNumber` | NVARCHAR(32) | 病歷號 🔑，**查不到就整列不寫**（表裡沒有床號） |
+| `terseLabel` | NVARCHAR(32) | 量測項目 🔑 |
+| `propName` | NVARCHAR(64) | 細項；`ABP` + `systolic` 才分得出是收縮壓 🔑。單值項目（HR）是**空字串**不是 null |
+| `chartTime` | DATETIME | 量測時間 🔑（ICCA 來源端叫 `measurementTime`，`vitals.js` 撈的時候就改名，跟 `CISData` 對齊） |
+| `numericValue` | FLOAT | 數值 |
+| `textValue` | NVARCHAR(256) | 非數值的量測值（模式、狀態字串）；數值型的項目是 null |
+| `storeTime` | DATETIME | ICCA 端寫入的時間，**下游的水位線** |
+| `insertedAt` | DATETIME | 這一列什麼時候寫進中介庫（**UTC+8**），用來核對拋轉有沒有斷 |
+
+沒有 `isDelete` / `updatedAt` / `changedAt`：來源的 CDS 只寫不改，儀器讀值不會被作廢，
+列寫進去之後不會再被動到。**一組鑰匙永遠只有一列。**
+
+**`CISData`**（神經評估與其他臨床紀錄）——**只新增，同一組識別鍵會有多列**（規格 §3）
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `ptEncounterId` | NVARCHAR(36) | 病人識別鍵 🔑 |
+| `interventionId` | NVARCHAR(36) | 哪一個評估項目 🔑 |
+| `chartTime` | DATETIME2(0) | 這筆紀錄代表的臨床時間 🔑 |
+| `lifetimeNumber` | NVARCHAR(50) | 病歷號，查不到就整列不寫（表裡沒有床號） |
+| `terseLabel` | NVARCHAR(32) | 項目名。超過 32 個字會被截斷並在執行訊息裡警告 |
+| `terseForm` / `verboseForm` | NVARCHAR(32) / (256) | 填寫值：不含單位 / 含單位 |
+| `storeTime` | DATETIME2(0) | ICCA 端最後寫入的時間，**下游的水位線**，也是版本的先後 |
+| `isDeleted` | BIT | 作廢註記，**由來源 `PtIntervention` 帶進來**：ICCA 那筆被刪除／作廢時是 1。撈的時候不過濾，下游要看得到「這筆沒了」這個變化 |
+| `rowHash` | BINARY(20) | 內容的 SHA-1。**去重看它**：表裡已經有一模一樣的內容就不寫 |
+| `insertedAt` | DATETIME | 這一列什麼時候寫進中介庫（**UTC+8**） |
+
+**沒有主鍵**——護理師改過的紀錄要多一列、舊的原封不動留著，識別鍵底下放得下多個版本。
+叢集索引是 `CX_CISData (ptEncounterId, interventionId, chartTime, storeTime)`，
+所以「取最新版本」與「看某筆的完整歷史」都是一次 seek。
+
+🔑 是規格上的**唯一鍵／識別鍵**（「臨床上這是哪一筆」）。
+`CDSUnvalidatedData` 一組鑰匙只有一列，所以鑰匙就是主鍵；`CISData` 一組鑰匙有多列，
+去重改看 `rowHash`。兩張表都沒有流水號欄位、都沒有 `updatedAt` / `changedAt`——
+列寫進去之後不會再被動到。
+
+## 下游怎麼只讀新的
+
+這是中介資料庫，所以「怎麼增量讀」是介面的一部分，不是下游自己的事。
+兩張表的答案都是 **`storeTime`**（規格 §4 對外就是這樣寫的）：
+
+```sql
+SELECT lifetimeNumber, terseLabel, propName,
+       numericValue, textValue, chartTime, storeTime
+FROM   dbo.CDSUnvalidatedData WITH (NOLOCK)
+WHERE  storeTime > @last          -- 上次同步記下的水位線
+ORDER BY storeTime, lifetimeNumber, terseLabel, propName, chartTime;
+```
+
+`IX_CDSUnvalidatedData_storeTime` 就是給這個查詢走 index seek 用的。
+一組鑰匙只有一列，下游讀到什麼就是什麼，不必再挑版本。
+
+另外三個看起來可以用、其實會漏資料的欄位：
+
+- **`insertedAt`**：同一批寫進來的列時間戳完全相同，當水位線會在批次邊界重複讀或漏讀。它的用途是核對拋轉有沒有斷（`DATEDIFF(MINUTE, MAX(insertedAt), SYSDATETIME())` 超過 15 分鐘就是異常）。
+- **流水號**：表裡刻意沒有。
+- **`chartTime`**：那是臨床時間不是寫入時間。補撈歷史時會出現「臨床時間很舊、剛剛才寫進來」的列，一樣會漏。
+
+`CISData` 同一組識別鍵有多列，所以讀進來還要**挑版本**——每組取 `storeTime` 最大的那一列，
+再看它的 `isDeleted` 決定是更新還是作廢：
+
+```sql
+WITH inc AS (
+  SELECT interventionId, chartTime, lifetimeNumber, terseForm, verboseForm, storeTime, isDeleted,
+         ROW_NUMBER() OVER (PARTITION BY lifetimeNumber, interventionId, chartTime
+                            ORDER BY storeTime DESC) AS rn
+  FROM   dbo.CISData WITH (NOLOCK)
+  WHERE  storeTime > @last
+)
+SELECT * FROM inc WHERE rn = 1 ORDER BY storeTime, interventionId, chartTime;
+```
+
+**不要**在增量查詢裡就過濾 `isDeleted = 0`，那樣會讀不到「這筆被作廢了」這個變化。
+
+## 重複怎麼擋
+
+排程的時間窗一定會重疊——每 5 分鐘跑一次、窗開 6 分鐘，同一筆資料至少會被撈到兩次。
+所以**窗開得比間隔大是安全的**：漏掉的資料下一輪不會自己補回來，重複的則會被吃掉。
+
+- **`CDSUnvalidatedData`：鑰匙已經在表裡就不寫**（`INSERT … WHERE NOT EXISTS`）。
+  來源的 CDS 是直接跑轉的環狀表，只寫不改，同一筆量測的內容不會變，
+  所以「鑰匙撞上」就是同一筆，不必再比內容。已經寫進去的列一個字都不會被動到。
+  鑰匙用**病歷號**而不是床號：同一床會換病人、病人也會轉床，床號認不出人，
+  所以床號根本不進表，查不到病歷號的列整列不寫。
+- **`CISData`：內容一模一樣就不寫**，不能看鑰匙——護理師可以回頭改紀錄，
+  同一組識別鍵底下本來就會有多列（先後版本）。每一列帶一個內容的 SHA-1 `rowHash`，
+  寫入時比它：時間窗重疊而重複撈到的完全一樣 → 不寫；**改過或被作廢 → 內容不同 → 多一列，
+  舊的原封不動留著**。作廢也是多一列（`isDeleted = 1`），不是回頭去改既有的列。
+
+`rowHash` 涵蓋所有欄位（含 `storeTime`），值取自**正規化之後**的內容——
+截斷過的字串、補成空字串的 null、0/1 的位元，雜湊看到的跟真正寫進表裡的一模一樣。
+`storeTime` 是來源的時間戳、不是我們撈取的時間，所以重複撈同一個版本雜湊還是一樣；
+只有來源真的重寫過那一筆才會變。演算法在 [sink.js](sink.js) 的 `rowHashOf`，
+SQL 端的等價寫法在 [sql/sink-migrate.sql](sql/sink-migrate.sql)（補算既有列用），
+**兩邊必須一致**，改動等於要求所有既有的列重寫一次。
+
+## 時間存的是什麼
+
+**表裡只有一種時間基準**——這是給下游講清楚最重要的一件事：
+
+**已經定案**，就是下面這個組合：
+
+| 欄位 | 基準 | 誰蓋的 |
+|---|---|---|
+| `chartTime` / `storeTime` | **UTC+8** | 撈出來的臨床時間（ICCA 存的是 UTC，撈的時候換算） |
+| `insertedAt` | **UTC+8** | 中介庫的 `SYSDATETIME()` |
+
+**兩組基準相同，可以直接相減**（例如「這筆資料從量到寫進來慢了多久」）。
+
+臨床時間走「字面值字串 + `CONVERT(..., 120)`」綁參數，不會被驅動程式再換算一次
+（直接綁 `Date` 物件的話 tedious 會依 `useUTC` 再偏移一次，變成又差 8 小時）。
+稽核時間則是資料庫自己蓋的：用 `SYSDATETIME()` 而不是 `SYSUTCDATETIME()`，
+所以跟臨床時間一樣是台灣時間——前提是**中介庫主機的時區設在 UTC+8**。
+
+> `--utc` / `timesInUtc` 這個開關對寫入資料庫的情境**不要再動**——已經有資料之後才切換，
+> 同一個欄位就會混著兩種基準，而且從值本身看不出來是哪一種。它留著是給落檔那條路用的。
+
+## 其它設定
+
+| 項目 | 預設 | 說明 |
+|---|---|---|
+| `enabled` | `false` | 沒設成 `true` 就完全不碰中介資料庫 |
+| `schema` / `vitalsTable` / `neuroTable` | `dbo` / `CDSUnvalidatedData` / `CISData` | 表名 |
+| `ensureTables` | `true` | 缺表就自動建；院內 DBA 先建好之後可以關掉 |
+| `alsoWriteFile` | `false` | 寫進資料庫之後還要不要照舊落一份 JSON 檔 |
+| `batchRows` | 自動 | 一批幾列；0 = 依欄位數算，維持在 SQL Server 2100 個參數的上限內 |
+| `schedule` | 無 | `server.js` 內建排程，見 [SERVER.md](SERVER.md) |
+
+寫入是**一個交易一次搞定**：建 `#stage` 暫存表 → 分批 `INSERT` →
+一次 `INSERT … WHERE NOT EXISTS` 進正式表。
+中途出錯整批 rollback，不會留半批資料。**全部站台 / 分片都失敗的那一輪不寫**——
+那是 0 筆，寫進去只會讓下游把故障看成「這段時間沒有資料」。
 
 ---
 
@@ -977,27 +1177,47 @@ DB_PASSWORD='你的密碼' node ring.js --mode head --pretty
 
 # 常駐 HTTP 服務（server.js）
 
-把 `ring.js` 的邏輯包成一支長駐服務，讓 **Rhapsody** 用 HTTP Client communication point
-定時來撈，不必每次觸發都冷啟動一個 node 行程、重連 26 張表。
+把 `ring.js`、`vitals.js`、`neuro.js` 包成一支長駐服務，Node 常駐、連線池保持溫熱，
+不必每次觸發都冷啟動一個 node 行程、重連資料庫。
+
+搭配 `sink` 之後它可以**自己定時撈、自己寫進中介資料庫**，不需要外部排程器：
+
+```json
+"sink": { "enabled": true, "connection": { ... },
+          "schedule": { "vitalsMinutes": 5, "neuroMinutes": 5 } }
+```
 
 ```bash
 node server.js          # 預設綁 127.0.0.1:8770
-curl http://127.0.0.1:8770/icca/latest?n=1000
+curl http://127.0.0.1:8770/health
+curl -X GET http://127.0.0.1:8770/icca/push/vitals   # 手動觸發一輪寫入
 ```
 
 | 路徑 | 說明 |
 |---|---|
 | `/health` | 探活，不碰資料庫 |
+| `/icca/push/vitals` | 撈一輪**直接寫進中介資料庫**，回寫入統計 |
+| `/icca/push/neuro` | 同上（神經評估） |
+| `/icca/vitals` | 生命徵象，一床一筆的 JSON（等同 `node vitals.js`，不寫資料庫） |
+| `/icca/neuro` | 神經評估，一位病人一筆的 JSON（等同 `node neuro.js`，不寫資料庫） |
 | `/icca/head` | 目前寫入頭是哪一張表 |
 | `/icca/order` | 26 張表由新到舊的順序與各表狀態 |
-| `/icca/latest` | 從 head 跨表撈最新 N 筆（**Rhapsody 定時撈這個**） |
+| `/icca/latest` | 從 head 跨表撈最新 N 筆的原始列 |
 | `/icca/at` | 某時間點落在哪張表，加 `&fetch=1` 順便撈 |
 
-查詢參數與 `ring.js` 的選項一致（`site`、`n`、`param`、`patient`、`from`、`to`、`at`…）。
-設定沿用 `databases.config.json`；監聽位址、埠、存取金鑰走環境變數
+`push` 那兩個是給外部排程器（工作排程器、Rhapsody Timer…）用的，設了 `sink.schedule`
+就連它們都不必接。`/icca/vitals` 與 `/icca/neuro` 沒有變，還是回 JSON、不寫資料庫。
+
+回應內容與對應的命令列工具寫出來的 JSON 完全一樣（同一段程式），只是不落檔。
+查詢參數也就是各工具的選項：`/icca/vitals` 吃 `window`、`site`、`param`、`utc`、
+`noPatients`…，`/icca/neuro` 吃 `window`、`utc`，ring 那幾個吃 `site`、`n`、`param`、
+`from`、`to`、`at`…。設定沿用 `databases.config.json`；監聽位址、埠、存取金鑰走環境變數
 （`ICCA_HOST` / `ICCA_PORT` / `ICCA_TOKEN`）。
 
-**完整說明——包含用 nssm 註冊成 Windows 服務、Rhapsody route 怎麼接、
+站台 / 分片**全部**失敗時回 502 而不是空陣列——空陣列配 200 會讓下游把故障當成
+「這次沒有資料」。部分失敗照樣回 200，加 `&withSummary=1` 可看逐站狀態。
+
+**完整說明——包含用 nssm 註冊成 Windows 服務、內建排程怎麼設、
 心跳與錯誤處理建議——在 [SERVER.md](SERVER.md)。**
 
 > 預設只綁 `127.0.0.1`。要對外開之前先設 `ICCA_TOKEN`，這支服務沒有其它存取控制。

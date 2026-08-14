@@ -17,12 +17,23 @@
  *   /health                 探活，不碰資料庫
  *   /icca/head              目前寫入頭是哪一張表
  *   /icca/order             26 張表由新到舊的順序與各表狀態
- *   /icca/latest            從 head 跨表撈最新 N 筆（Rhapsody 定時撈這個）
+ *   /icca/latest            從 head 跨表撈最新 N 筆（原始列，ring.js）
  *   /icca/at                某個時間點落在哪一張表（可加 &fetch=1 順便撈）
+ *   /icca/vitals            生命徵象，一床一筆（vitals.js）
+ *   /icca/neuro             神經評估，一位病人一筆（neuro.js）
+ *   /icca/push/vitals       撈一輪並直接寫進中介資料庫，回寫入統計
+ *   /icca/push/neuro        同上（神經評估）
  *
- * 共用查詢參數：
+ * 設定檔有 "sink" 區塊且 enabled 時，資料改成直接寫進中介資料庫，不必有人來拉。
+ * 觸發有兩種，擇一即可：
+ *   - sink.schedule：服務自己定時跑（見 startSchedule），什麼都不必再接
+ *   - /icca/push/*：由外部排程器（工作排程器、Rhapsody Timer…）打一下就跑一輪
+ * 上面的 /icca/vitals 與 /icca/neuro 沒有變，還是回 JSON、不寫資料庫。
+ *
+ * ring 端點（head/order/latest/at）的查詢參數：
  *   site, n(=latestN), direction, param, patient, device, from, to, tzOffset,
  *   at, by, fetch, pretty
+ * vitals / neuro 的查詢參數見各自的 epVitals / epNeuro。
  *
  * 設定：沿用 databases.config.json（或 ring.config.json）。
  *   另可在設定檔加一個 "server" 區塊，或用環境變數覆寫：
@@ -38,6 +49,13 @@ const fs = require('fs');
 const path = require('path');
 const sql = require('mssql');
 const ring = require('./ring.js');
+const vitals = require('./vitals.js');
+const neuro = require('./neuro.js');
+const sink = require('./sink.js');
+
+// vitals / neuro 原本是「跑一次就結束」的命令列工具，連完就把池關掉。
+// 常駐服務要的是相反：同一個 server/database 只連一次，之後每次呼叫都用溫熱的連線。
+vitals.keepPools();
 
 // ---------- 設定 ----------
 const CONFIG_PATH = process.env.ICCA_CONFIG || 'databases.config.json';
@@ -65,6 +83,11 @@ function resolveSecret(value) {
 const CFG = readJson(CONFIG_PATH);
 const SRV = CFG.server || {};
 const TOKEN = process.env.ICCA_TOKEN || SRV.token || null;
+const SINK = sink.mergeSettings(CFG);
+const SINK_ON = sink.wanted(SINK);
+// 啟用了就在啟動時檢查連線設定齊不齊。服務現在的本業就是寫進中介資料庫，
+// 設錯了不該讓它裝作健康——寧可起不來，也不要每 5 分鐘失敗一次而沒人看見。
+if (SINK_ON) sink.assertConfigured(SINK);
 
 // ---------- 溫熱連線池（每個站台各一個，重複使用）----------
 // Map 裡放的是「建池的 Promise」而不是建好的池：同時打進來的請求會等同一個 Promise，
@@ -251,11 +274,165 @@ async function epAt(ctx, q) {
   return out;
 }
 
+// ---------- vitals / neuro ----------
+// 這兩支各自管自己的設定與連線（都在 vitals.js 的池裡），不需要 ring 的 ctx。
+
+// 同一個端點被重複觸發時排隊跑：兩輪同時跑會互相蓋掉表號錨點檔與病人快取，
+// 而且對 DB 的壓力憑空翻倍。Rhapsody 若因為逾時重送，第二個請求會等第一個跑完。
+const chains = new Map();
+function serialize(key, fn) {
+  const prev = chains.get(key) || Promise.resolve();
+  const next = prev.then(fn, fn); // 前一輪失敗也照跑
+  chains.set(key, next.catch(() => {})); // 鏈上只留成功/失敗的時間點，不留 rejection
+  return next;
+}
+
+// 查詢參數對應 vitals.js 的命令列旗標，語意完全一樣：
+//   window(w) 時間窗分鐘、site 只跑哪幾站、param 指定 parameterId、discover 從 primary 查、
+//   utc 不換算時區、noPatients 不查病歷號、keepUnmatched 保留沒對到病人的床、
+//   allRows 不降頻、noAperiodic 不撈 NBP、withSummary 包成 { summary, rows }
+async function epVitals(_ctx, q) {
+  const res = await serialize('vitals', () =>
+    vitals.collect({
+      config: CONFIG_PATH,
+      window: numOrNull(q.window != null ? q.window : q.w),
+      site: q.site || null,
+      param: q.param != null ? q.param : null,
+      discover: truthy(q.discover),
+      utc: truthy(q.utc),
+      noPatients: truthy(q.noPatients),
+      keepUnmatched: truthy(q.keepUnmatched),
+      allRows: truthy(q.allRows),
+      noAperiodic: truthy(q.noAperiodic),
+      patientDb: q.patientsDb || null,
+    })
+  );
+  // 全部站台都失敗時一定要回錯誤：空陣列配 200 會讓 Rhapsody 當成「這次沒有資料」，
+  // 一路往下送到下游，等有人發現時已經斷了好幾個小時。這對應 CLI 的 exitCode=1。
+  failIfAllDown(res.failures, res.sites.length, res.summary, (s) => s.site);
+
+  return truthy(q.withSummary) || res.settings.includeSummary === true
+    ? { summary: res.summary, rows: res.rows }
+    : res.rows;
+}
+
+// 查詢參數對應 neuro.js 的命令列旗標：
+//   window(w) 時間窗分鐘（不給就用 neuro.js 的預設 6）、utc 不換算時區、withSummary 包成 { summary, rows }
+async function epNeuro(_ctx, q) {
+  const res = await serialize('neuro', () =>
+    neuro.collect({
+      config: CONFIG_PATH,
+      window: numOrNull(q.window != null ? q.window : q.w),
+      utc: truthy(q.utc),
+      primaryDb: q.primaryDb || null,
+    })
+  );
+  failIfAllDown(res.failures, res.groups, res.summary, (s) => s.db);
+
+  return truthy(q.withSummary) || res.settings.includeSummary === true
+    ? { summary: res.summary, rows: res.rows }
+    : res.rows;
+}
+
+// ---------- 寫進中介資料庫 ----------
+// 撈一輪 → 攤平 → MERGE 進 sink 的表。撈的那一段跟 /icca/vitals 完全是同一段程式，
+// 差別只在結果不是回給呼叫端，而是直接寫進資料庫。
+
+/** 時間窗預設跟排程間隔對齊，再加一點餘裕（windowSlackMinutes），寧可重疊也不要漏 */
+function pushWindow(kind, q) {
+  const explicit = numOrNull(q && (q.window != null ? q.window : q.w));
+  if (explicit) return explicit;
+  const sc = SINK.schedule || {};
+  const every = kind === 'vitals' ? sc.vitalsMinutes : sc.neuroMinutes;
+  if (!every) return null; // 交給 vitals.js / neuro.js 自己的預設值
+  return every + (sc.windowSlackMinutes != null ? sc.windowSlackMinutes : 1);
+}
+
+async function pushVitals(q = {}) {
+  if (!SINK_ON) throw httpError(400, '設定檔沒有啟用 sink（databases.config.json 的 "sink" 區塊，enabled: true）');
+  const res = await serialize('vitals', () =>
+    vitals.collect({ config: CONFIG_PATH, window: pushWindow('vitals', q), site: q.site || null })
+  );
+  failIfAllDown(res.failures, res.sites.length, res.summary, (s) => s.site);
+  const stats = await sink.writeVitals(res.rows, SINK);
+  return { kind: 'vitals', beds: res.rows.length, fetched: res.total, ...stats };
+}
+
+async function pushNeuro(q = {}) {
+  if (!SINK_ON) throw httpError(400, '設定檔沒有啟用 sink（databases.config.json 的 "sink" 區塊，enabled: true）');
+  const res = await serialize('neuro', () =>
+    neuro.collect({ config: CONFIG_PATH, window: pushWindow('neuro', q) })
+  );
+  failIfAllDown(res.failures, res.groups, res.summary, (s) => s.db);
+  const stats = await sink.writeNeuro(res.rows, SINK);
+  return { kind: 'neuro', patients: res.rows.length, fetched: res.total, ...stats };
+}
+
+/**
+ * 服務自己定時跑（sink.schedule）。設定了才啟用：
+ *   "schedule": { "vitalsMinutes": 5, "neuroMinutes": 5 }（sink.config.json）
+ * 這樣連外部排程器都不必——Node 常駐、連線池溫熱，時間到就撈一輪寫進去。
+ *
+ * 上一輪還沒跑完就跳過這一輪，不排隊：排隊只會越積越多，而且下一輪本來就會
+ * 把漏掉的時間窗一起帶到（窗開得比間隔大）。
+ */
+function startSchedule() {
+  const sc = SINK.schedule;
+  if (!SINK_ON || !sc) return [];
+  const jobs = [
+    { name: 'vitals', minutes: sc.vitalsMinutes, run: pushVitals },
+    { name: 'neuro', minutes: sc.neuroMinutes, run: pushNeuro },
+  ].filter((j) => Number(j.minutes) > 0);
+
+  return jobs.map((j) => {
+    let busy = false;
+    const tick = async () => {
+      if (busy) return console.warn(`${new Date().toISOString()} ⚠ 上一輪 ${j.name} 還沒結束，這一輪跳過`);
+      busy = true;
+      const started = Date.now();
+      try {
+        const stats = await j.run();
+        console.log(`${new Date().toISOString()} [排程 ${j.name}] ${sink.describe(stats)}`);
+      } catch (e) {
+        console.error(`${new Date().toISOString()} [排程 ${j.name}] ✗ ${e.message}（${Date.now() - started}ms）`);
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = setInterval(tick, j.minutes * 60000);
+    setTimeout(tick, 1000).unref(); // 啟動一秒後先跑一輪，不必等第一個間隔才知道通不通
+    return { name: j.name, minutes: j.minutes, timer };
+  });
+}
+
+/**
+ * 一個都沒成功 → 502，錯誤訊息帶上各來源的原因，呼叫端走 error 路徑。
+ * 只有部分失敗時照常回 200（資料還是有用），但把情況寫進服務 log；
+ * 呼叫端要逐站狀態就加 &withSummary=1。
+ */
+function failIfAllDown(failures, total, summary, nameOf) {
+  if (!total || failures < total) {
+    if (failures) console.warn(`  ⚠ ${failures}/${total} 個來源失敗，仍回傳其餘資料`);
+    return;
+  }
+  const why = summary
+    .filter((s) => !s.ok)
+    .map((s) => `${nameOf(s)}：${s.error}`)
+    .join('；');
+  throw httpError(502, `全部 ${total} 個來源都失敗（${why}）`);
+}
+
+// ring: true 的端點要先拿到環狀表的連線（getContext），vitals / neuro 自己連
 const ROUTES = {
-  '/icca/head': epHead,
-  '/icca/order': epOrder,
-  '/icca/latest': epLatest,
-  '/icca/at': epAt,
+  '/icca/head': { fn: epHead, ring: true },
+  '/icca/order': { fn: epOrder, ring: true },
+  '/icca/latest': { fn: epLatest, ring: true },
+  '/icca/at': { fn: epAt, ring: true },
+  '/icca/vitals': { fn: epVitals, ring: false },
+  '/icca/neuro': { fn: epNeuro, ring: false },
+  // 撈一輪直接寫進中介資料庫，回的是寫入統計而不是資料本身
+  '/icca/push/vitals': { fn: (_c, q) => pushVitals(q), ring: false },
+  '/icca/push/neuro': { fn: (_c, q) => pushNeuro(q), ring: false },
 };
 
 // ---------- 小工具 ----------
@@ -319,12 +496,12 @@ const server = http.createServer(async (req, res) => {
     if (given !== TOKEN) return send(res, 401, { error: 'unauthorized' }, pretty);
   }
 
-  const handler = ROUTES[u.pathname];
-  if (!handler) return send(res, 404, { error: 'not found', paths: Object.keys(ROUTES).concat('/health') }, pretty);
+  const route = ROUTES[u.pathname];
+  if (!route) return send(res, 404, { error: 'not found', paths: Object.keys(ROUTES).concat('/health') }, pretty);
 
   try {
-    const ctx = await getContext(q.site);
-    const out = await handler(ctx, q);
+    const ctx = route.ring ? await getContext(q.site) : null;
+    const out = await route.fn(ctx, q);
     const ms = Date.now() - started;
     console.log(`${new Date().toISOString()} ${req.method} ${u.pathname}${safeSearch(u)} -> 200 ${ms}ms`);
     return send(res, 200, out, pretty);
@@ -336,20 +513,33 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+let schedule = [];
 server.listen(PORT, HOST, () => {
   console.log(`ICCA 服務已啟動：http://${HOST}:${PORT}`);
-  console.log(`  設定檔：${CONFIG_PATH}`);
-  console.log(`  端點：/health /icca/head /icca/order /icca/latest /icca/at`);
+  console.log(`  設定檔：${CONFIG_PATH}（資料來源）`);
+  if (SINK.configFile) console.log(`        ${SINK.configFile}（中介資料庫）`);
+  console.log(`  端點：/health ${Object.keys(ROUTES).join(' ')}`);
   console.log(`  存取控制：${TOKEN ? '需要 X-API-Key / ?token=' : '未設 token（僅綁 ' + HOST + '）'}`);
+  console.log(`  寫入資料庫：${SINK_ON ? sink.describeTarget(SINK) : '未啟用（沒有 sink.config.json 或 enabled 不是 true）'}`);
+
+  schedule = startSchedule();
+  if (schedule.length) {
+    console.log(`  內建排程：${schedule.map((j) => `${j.name} 每 ${j.minutes} 分鐘`).join('、')}`);
+  } else if (SINK_ON) {
+    console.log(`  內建排程：未設定（用 /icca/push/vitals、/icca/push/neuro 由外部觸發）`);
+  }
 });
 
 // 收到終止訊號時優雅關閉（Windows 服務停止 / Ctrl+C）
 function shutdown() {
   console.log('關閉中...');
+  for (const j of schedule) clearInterval(j.timer);
   server.close(() => {
     // pools 裡放的是 Promise（見 getContext），要先等它 resolve 才拿得到池
     Promise.all(
-      [...pools.values()].map((p) => Promise.resolve(p).then((c) => c.pool.close()).catch(() => {}))
+      [...pools.values()]
+        .map((p) => Promise.resolve(p).then((c) => c.pool.close()).catch(() => {}))
+        .concat(vitals.closePools()) // vitals / neuro 共用的那組池
     ).finally(() => process.exit(0));
   });
   setTimeout(() => process.exit(0), 5000).unref();

@@ -10,7 +10,7 @@
  */
 SELECT DISTINCT
      i.terseLabel
-    ,Attribute.propName
+    ,CdsParameterMap.propName
     ,CdsParameterMap.cdsParameterId
 FROM Intervention i
 JOIN InterventionItem ON i.interventionId                = InterventionItem.interventionId
@@ -25,7 +25,7 @@ JOIN CdsParameterMap  ON CdsParameterMap.propName              = Attribute.propN
 --                   AND CdsParameterMap.cdsParameterId > 0
 WHERE
       i.isPrimary = 1
-  AND i.terseLabel IN (N'體溫(˚C)', N'HR', N'ABP', N'NBP', N'SpO2', N'ICP', N'PAP', N'CVP')
+  AND i.terseLabel IN (N'體溫(˚C)', N'HR', N'ABP', N'NBP', N'SpO2', N'ICP', N'PAP', N'PCWP', N'CVP')
   AND EXISTS (
       SELECT 1
       FROM dbo.Document      d  WITH (NOLOCK)

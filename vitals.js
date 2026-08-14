@@ -18,6 +18,8 @@
  *
  * 輸出是「一床一筆」：床號與病歷號在外層，量測值收在 records[]，依床號自然排序
  * （ICU-10 排在 ICU-2 後面）。跨站合併之後才分組，跟 neuro.js 同一個形狀。
+ * 有 sink.config.json（中介資料庫的設定，跟這裡的資料來源分開放）時改成直接寫進
+ * 中介資料庫（一筆紀錄一列），不落 JSON 檔——見 sink.js。--no-db 可以臨時改回落檔。
  *
  * 重點：不要查 dbo.UnvalidatedDevicePeriodicData 這個 view。
  *   view 是 26 張表的 UNION，撈近 5 分鐘的資料也得掃過全部 26 張。
@@ -43,6 +45,7 @@ const fs = require('fs');
 const path = require('path');
 const sql = require('mssql');
 const ring = require('./ring.js');
+const sink = require('./sink.js'); // 撈完直接寫進中介資料庫（設定檔的 "sink" 區塊）
 
 // ---------- 命令列參數 ----------
 function parseArgs(argv) {
@@ -67,6 +70,9 @@ function parseArgs(argv) {
     else if (t === '--all-rows') a.allRows = true;
     else if (t === '--dry-run' || t === '-n') a.dryRun = true;
     else if (t === '--convert') a.convert = argv[++i];
+    else if (t === '--to-db') a.toDb = true;
+    else if (t === '--no-db') a.noDb = true;
+    else if (t === '--sink-config') a.sinkConfig = argv[++i];
     else if (t === '--with-summary') a.withSummary = true;
     else if (t === '--help' || t === '-h') a.help = true;
   }
@@ -96,6 +102,9 @@ function printHelp() {
       --patients-sql <檔案>  換一份查病人的 SQL（預設 sql/patients.sql）
       --patients-db <資料庫> 病人資料在哪個資料庫（預設讀 SQL 檔裡的 USE）
       --check-patients  診斷病歷號為什麼是 null（只讀，不輸出檔案）
+      --to-db           撈完直接寫進中介資料庫（設定檔的 sink 區塊），不落 JSON 檔
+      --no-db           這一次不要寫資料庫（sink.enabled 為 true 時用來臨時關掉）
+      --sink-config <檔案>  中介資料庫的設定檔（預設 sink.config.json）
       --with-summary    輸出包成 { summary, rows }（預設是單純的資料陣列）
   -n, --dry-run        只檢查設定，不連資料庫（換機器時先跑這個）
       --convert <檔案>  把 parameterId 清單轉成 JSON 後結束，不連資料庫
@@ -115,6 +124,8 @@ parameterId 來源優先序：
 輸出：
   一床一筆 → { bed, lifetimeNumber, records: [...] }，依床號自然排序（沒床的排最後）。
   量測值收在 records[] 裡，床號與病歷號不重複。跟 neuro.js 同一個形狀。
+  有 sink.config.json 且 enabled 時，改成直接寫進中介資料庫（一筆紀錄一列），
+  不再落 JSON 檔——要兩種都要就設 alsoWriteFile 或加 -o 指定檔名。
 
 病人資料：
   預設會連 primary 跑 sql/patients.sql，用「床號」把病歷號（lifetimeNumber）
@@ -250,14 +261,70 @@ function safeIdent(name, label) {
   return name;
 }
 
+// ---------- 連線池 ----------
+// 預設是「用完就關」：命令列跑一次就結束，留著也沒人用。
+// server.js 這種常駐的先呼叫 keepPools()，之後同一個 server/database 只連一次，
+// 每次呼叫 collect() 都能直接用溫熱的連線（release() 在這個模式下不會真的關掉池）。
+let poolCache = null; // 不是 null 就代表在重用模式：key -> Promise<ConnectionPool>
+
+/** 開啟連線重用（常駐服務用）。CLI 不呼叫，行為與以前完全一樣。 */
+function keepPools(on = true) {
+  poolCache = on ? poolCache || new Map() : null;
+}
+
+function poolKey(conn) {
+  const o = conn.options || {};
+  return [conn.server, o.instanceName || '', conn.port || 1433, conn.database, conn.user || ''].join('|');
+}
+
+async function newPool(conn) {
+  const pool = new sql.ConnectionPool(conn);
+  await pool.connect();
+  return pool;
+}
+
 async function connect(connection, queryTimeoutMs) {
   const conn = { ...connection };
   if (conn.password) conn.password = resolveSecret(conn.password);
   if (conn.user) conn.user = resolveSecret(conn.user);
   if (queryTimeoutMs) conn.requestTimeout = queryTimeoutMs;
-  const pool = new sql.ConnectionPool(conn);
-  await pool.connect();
-  return pool;
+  if (!poolCache) return newPool(conn);
+
+  const key = poolKey(conn);
+  const cached = poolCache.get(key);
+  if (cached) {
+    const pool = await Promise.resolve(cached).catch(() => null);
+    if (pool && pool.connected) return pool;
+    // 斷線或當初就沒連起來的池丟掉重建；別人已經換上新的就不要動它
+    if (poolCache.get(key) === cached) poolCache.delete(key);
+    if (pool) pool.close().catch(() => {});
+  }
+
+  // 這裡到 set 之間沒有 await，單執行緒下不會有人插隊建出第二個池
+  const pending = newPool(conn);
+  poolCache.set(key, pending);
+  try {
+    return await pending;
+  } catch (e) {
+    if (poolCache.get(key) === pending) poolCache.delete(key);
+    throw e;
+  }
+}
+
+/** 用完的池：CLI 模式真的關掉，重用模式留給下一次呼叫 */
+async function release(pool) {
+  if (!pool || poolCache) return;
+  try { await pool.close(); } catch (_) {}
+}
+
+/** 關掉所有重用中的池（服務要結束時呼叫） */
+async function closePools() {
+  if (!poolCache) return;
+  const pending = [...poolCache.values()];
+  poolCache.clear();
+  await Promise.all(
+    pending.map((p) => Promise.resolve(p).then((pool) => pool.close()).catch(() => {}))
+  );
 }
 
 // ---------- 匯入自行撈出的 parameterId ----------
@@ -280,7 +347,7 @@ function pickKey(keys, wanted) {
  * 收下一筆。out = { ids, labels, props }
  * 同一個 id 出現多次只留第一次的標籤（例如 -268367660 同時掛在 ABP diastolic 與 systolic 下）。
  */
-function collect(out, id, label, prop) {
+function addParam(out, id, label, prop) {
   const n = typeof id === 'number' ? id : Number(String(id).trim());
   if (!Number.isFinite(n) || !Number.isInteger(n)) return;
   if (!out.ids.includes(n)) out.ids.push(n);
@@ -322,9 +389,9 @@ function parseParameterList(text) {
         if (!idKey) continue;
         const labelKey = pickKey(keys, LABEL_KEYS);
         const propKey = pickKey(keys, PROP_KEYS);
-        collect(out, item[idKey], labelKey ? item[labelKey] : null, propKey ? item[propKey] : null);
+        addParam(out, item[idKey], labelKey ? item[labelKey] : null, propKey ? item[propKey] : null);
       } else {
-        collect(out, item, null, null);
+        addParam(out, item, null, null);
       }
     }
     return out;
@@ -354,7 +421,7 @@ function parseParameterList(text) {
     for (const line of lines.slice(1)) {
       const cols = split(line);
       if (cols.length <= idIdx) continue;
-      collect(out, cols[idIdx], labelIdx >= 0 ? cols[labelIdx] : null, propIdx >= 0 ? cols[propIdx] : null);
+      addParam(out, cols[idIdx], labelIdx >= 0 ? cols[labelIdx] : null, propIdx >= 0 ? cols[propIdx] : null);
     }
     return out;
   }
@@ -381,7 +448,7 @@ function parseParameterList(text) {
       if (idIdx >= 0) {
         const [labelIdx = -1, propIdx = -1] = textCols;
         for (const r of rows) {
-          collect(out, r[idIdx], labelIdx >= 0 ? r[labelIdx] : null, propIdx >= 0 ? r[propIdx] : null);
+          addParam(out, r[idIdx], labelIdx >= 0 ? r[labelIdx] : null, propIdx >= 0 ? r[propIdx] : null);
         }
         return out;
       }
@@ -389,7 +456,7 @@ function parseParameterList(text) {
   }
 
   // 真的看不出結構：把所有像整數的 token 撿起來
-  for (const r of rows) for (const cell of r) collect(out, cell, null, null);
+  for (const r of rows) for (const cell of r) addParam(out, cell, null, null);
   return out;
 }
 
@@ -438,7 +505,7 @@ async function discoverParameterIds(pool, sqlText) {
   const out = { ids: [], labels: {}, props: {} };
   // 欄名沿用 parameters.sql：terseLabel / propName / cdsParameterId
   for (const row of r.recordset || []) {
-    collect(out, row.cdsParameterId, row.terseLabel, row.propName);
+    addParam(out, row.cdsParameterId, row.terseLabel, row.propName);
   }
   return out;
 }
@@ -626,7 +693,7 @@ async function runPatientSql(primary, candidates, sqlText, timeout) {
     } catch (e) {
       errors.push({ database, message: e.message });
     } finally {
-      if (pool) { try { await pool.close(); } catch (_) {} }
+      await release(pool);
     }
   }
   return { database: null, rows: null, errors };
@@ -757,7 +824,7 @@ async function checkPatients(sites, settings, args, registry) {
     } catch (e) {
       console.log(`   ${site.name}：✗ ${e.message}`);
     } finally {
-      if (pool) { try { await pool.close(); } catch (_) {} }
+      await release(pool);
     }
   }
 
@@ -861,8 +928,14 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
   const req = pool.request().input('win', sql.Int, windowMinutes);
   parameterIds.forEach((v, i) => req.input(`p${i}`, sql.Int, v));
 
-  // bed（UdsBed.label）就是接 primary 病人資料的鑰匙，本來就要輸出，不必再多撈 bedId
-  const COLS = 'bed, parameterId, numericValue, measurementTime, storeTime';
+  // bed（UdsBed.label）就是接 primary 病人資料的鑰匙，本來就要輸出，不必再多撈 bedId。
+  // textValue 是非數值的量測值（儀器送出的模式、狀態字串）：絕大多數項目的值在
+  // numericValue、這一欄是 NULL，但兩欄都要撈，不然那些項目會變成一列沒有值的資料。
+  //
+  // measurementTime 在 SELECT 就改名成 chartTime——這支工具從這裡開始一路到中介資料庫
+  // 都叫 chartTime，跟 neuro.js 與介接規格同名同角色。ICCA 來源端的欄名仍是
+  // measurementTime，所以 WHERE / PARTITION BY / 內層排序照樣寫 p.measurementTime。
+  const COLS = 'bed, parameterId, numericValue, textValue, chartTime, storeTime';
 
   // 每床每分鐘每個參數只留最新一筆。監視器可能每幾秒送一次，降頻後資料量差很多。
   // 在 SQL 端做掉，網路傳輸與 JSON 大小一起省；要原始逐筆就關掉 perMinute。
@@ -881,7 +954,8 @@ SELECT
     b.label            AS bed,
     p.parameterId,
     p.numericValue,
-    p.measurementTime,
+    p.textValue,
+    p.measurementTime  AS chartTime,
     p.storeTime${rank}
 FROM       dbo.[${t}]         p WITH (NOLOCK)
 INNER JOIN dbo.DeviceInstance d WITH (NOLOCK) ON d.deviceInstanceId = p.deviceInstanceId
@@ -893,7 +967,7 @@ WHERE p.measurementTime >= DATEADD(MINUTE, -@win, GETUTCDATE())
     ? `WITH ranked AS (${inner}
 )
 SELECT ${COLS} FROM ranked WHERE _rn = 1
-ORDER BY parameterId, measurementTime DESC`
+ORDER BY parameterId, chartTime DESC`
     : `${inner}
 ORDER BY p.parameterId, p.measurementTime DESC`;
 
@@ -937,20 +1011,20 @@ async function collectAperiodic(pool, { table, parameterIds, windowMinutes, sett
 function dedupePerMinute(rows) {
   const kept = new Map();
   for (const r of rows) {
-    if (!r.measurementTime) continue;
-    const t = new Date(r.measurementTime);
+    if (!r.chartTime) continue;
+    const t = new Date(r.chartTime);
     const minute = Math.floor(t.getTime() / 60000);
     const key = `${r.bed}|${r.parameterId}|${minute}`;
     const prev = kept.get(key);
-    if (!prev || t > new Date(prev.measurementTime)) kept.set(key, r);
+    if (!prev || t > new Date(prev.chartTime)) kept.set(key, r);
   }
-  // 沒有 measurementTime 的資料（理論上不該有）原樣保留，不要默默吃掉
-  const orphans = rows.filter((r) => !r.measurementTime);
+  // 沒有 chartTime 的資料（理論上不該有）原樣保留，不要默默吃掉
+  const orphans = rows.filter((r) => !r.chartTime);
   return [...kept.values(), ...orphans];
 }
 
-// 會被換算的時間欄位
-const TIME_FIELDS = ['measurementTime', 'storeTime'];
+// 會被換算的時間欄位（chartTime 是 ICCA 的 measurementTime，撈的時候就改名了）
+const TIME_FIELDS = ['chartTime', 'storeTime'];
 
 /**
  * ICCA 存的是 UTC，直接輸出的話台灣看起來會少 8 小時。
@@ -1038,7 +1112,7 @@ async function runSite(site, settings, args, registry, anchors) {
       try {
         return await discoverParameterIds(pool, sqlText);
       } finally {
-        try { await pool.close(); } catch (_) {}
+        await release(pool);
       }
     });
 
@@ -1170,6 +1244,8 @@ async function runSite(site, settings, args, registry, anchors) {
       // _sourceTable 與 parameterId 只是內部用的（跨表去重、對 terseLabel），不輸出；
       // 站台名放在 --with-summary 的 summary 裡，不必每一筆都重複一次
       const { _sourceTable, parameterId, ...rest } = r;
+      // textValue 只有非數值的項目才有值，數值型的項目留一排 null 沒有意義，不輸出
+      if (rest.textValue == null) delete rest.textValue;
       // terseLabel 是臨床項目（HR、ABP、體溫…），propName 是細項（systolic/diastolic/mean）
       // 兩者來自 parameterId 清單，欄名沿用 CdsParameterMap 的原始欄名
       const base = {
@@ -1218,8 +1294,95 @@ async function runSite(site, settings, args, registry, anchors) {
       rows,
     };
   } finally {
-    try { await pool.close(); } catch (_) {}
+    await release(pool);
   }
+}
+
+// ---------- 撈一輪（命令列與 server.js 共用）----------
+
+/** --site cds1,cds2 的篩選（不分大小寫）；沒指定就是全部 enabled 的站台 */
+function selectSites(allSites, siteArg) {
+  const sites = allSites.filter((s) => s.enabled !== false);
+  if (!siteArg) return sites;
+  const want = String(siteArg).split(',').map((s) => s.trim().toLowerCase());
+  return sites.filter((s) => want.includes(String(s.name).toLowerCase()));
+}
+
+/**
+ * 跑完所有站台並回傳結果。不讀命令列、不寫檔，所以 server.js 可以直接呼叫。
+ * opts 就是 parseArgs 出來的那個形狀（window / site / param / utc / noPatients…）。
+ * 回傳 { settings, sites, summary, rows, total, failures }，rows 是一床一筆的陣列。
+ */
+async function collect(opts = {}) {
+  const args = { config: 'databases.config.json', ...opts };
+
+  // primaryCache 是「同一輪裡多個 CDS 共用一次 primary 查詢」用的。常駐服務跑第二輪時
+  // 病人早就換了，這裡一定要清掉，否則會一直輸出第一輪的病歷號。
+  primaryCache.clear();
+
+  const cfg = loadConfig(args.config);
+  const settings = mergeSettings(cfg);
+  const registry = buildConnectionRegistry(cfg);
+  const anchors = loadAnchors(settings.anchorCacheFile);
+
+  const { sites: allSites, primaries, derived } = deriveSites(cfg, settings);
+  // 沒指定 defaultPrimary 時，用推出來的第一個非 CDS 資料庫
+  if (!settings.defaultPrimary && primaries.length) settings.defaultPrimary = primaries[0];
+
+  if (derived) {
+    console.log(
+      `從 ${args.config} 認出 ${allSites.length} 個 CDS：${allSites.map((s) => s.name).join(', ')}` +
+        (primaries.length ? `　primary：${primaries.join(', ')}` : '')
+    );
+  }
+
+  const sites = selectSites(allSites, args.site);
+  if (!sites.length) throw new Error('沒有任何 enabled 的站台');
+
+  console.log(`開始平行查詢 ${sites.length} 個站台...`);
+  const settled = await Promise.allSettled(sites.map((s) => runSite(s, settings, args, registry, anchors)));
+
+  const merged = [];
+  const summary = [];
+  let failures = 0;
+
+  settled.forEach((s, i) => {
+    const name = sites[i].name;
+    if (s.status === 'fulfilled') {
+      merged.push(...s.value.rows);
+      summary.push({
+        site: name,
+        ok: true,
+        headTable: s.value.headTable,
+        tablesQueried: s.value.tablesQueried,
+        dbTimeUtc: s.value.dbTimeUtc,
+        count: s.value.count,
+        periodicRows: s.value.periodicRows,
+        aperiodicRows: s.value.aperiodicRows,
+        patientBeds: s.value.patientBeds,
+        unmatchedBeds: s.value.unmatchedBeds,
+        droppedRows: s.value.droppedRows,
+        scanMs: s.value.scanMs,
+        fetchMs: s.value.fetchMs,
+      });
+      console.log(
+        `  ✓ ${name}：${s.value.count} 筆` +
+          (s.value.aperiodicRows ? `（含非週期 ${s.value.aperiodicRows} 筆）` : '') +
+          `（${s.value.headTable}，掃描 ${s.value.scanMs}ms + 撈取 ${s.value.fetchMs}ms）`
+      );
+    } else {
+      failures++;
+      const msg = s.reason && s.reason.message ? s.reason.message : String(s.reason);
+      summary.push({ site: name, ok: false, error: msg });
+      console.error(`  ✗ ${name}：${msg}`);
+    }
+  });
+
+  saveAnchors(settings.anchorCacheFile, anchors);
+
+  // 一床一筆（與 neuro.js 同一個形狀），量測值收在 records[]。
+  // 每一筆只留下游用得到的欄位，站台 / 來源表 / parameterId 這些內部資訊不輸出。
+  return { settings, sites, summary, rows: groupByBed(merged), total: merged.length, failures };
 }
 
 // ---------- 主流程 ----------
@@ -1250,13 +1413,50 @@ async function main() {
 
   const cfg = loadConfig(args.config);
   const settings = mergeSettings(cfg);
+  // 中介資料庫（sink）：有設定就直接寫進去，不再落 JSON 檔
+  const sinkSettings = sink.mergeSettings(cfg, args.sinkConfig);
+  const toDb = sink.wanted(sinkSettings, args);
+  if (toDb) sink.assertConfigured(sinkSettings); // 連線沒設好就別讓它撈完一輪才發現
   // 檔名裡的 {ts} 在這裡就換掉，dry-run 印出來的與實際寫出的是同一個名字
   const outFile = resolveOutputName(
     args.out || settings.output,
     settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8
   );
+  // 寫資料庫時預設不落檔（這就是改流程的目的）；-o 明講檔名或設 alsoWriteFile 才兩邊都寫
+  const wantFile = !toDb || !!args.out || sinkSettings.alsoWriteFile === true;
+
+  // 一般執行：查詢那一段在 collect() 裡（server.js 走的是同一段），這裡只負責輸出
+  if (!args.checkPatients && !args.dryRun) {
+    const started = Date.now();
+    const res = await collect(args);
+
+    const secs = ((Date.now() - started) / 1000).toFixed(1);
+    console.log('----------------------------------------');
+    console.log(`合併總筆數：${res.total} 筆，${res.rows.length} 床`);
+    console.log(`成功：${res.sites.length - res.failures} / ${res.sites.length}，耗時 ${secs}s`);
+
+    // 寫資料庫。全部站台都失敗時不要寫——那是 0 筆，寫進去也只是把故障當成沒資料。
+    if (toDb && res.failures < res.sites.length) {
+      const stats = await sink.writeVitals(res.rows, sinkSettings);
+      console.log(`已寫入 ${sink.describe(stats)}`);
+    }
+
+    if (wantFile) {
+      // 一床一筆的 JSON 陣列；需要各站狀態時加 --with-summary
+      const withSummary = args.withSummary || res.settings.includeSummary === true;
+      const payload = withSummary ? { summary: res.summary, rows: res.rows } : res.rows;
+      const json = args.pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
+      const outAbs = path.resolve(process.cwd(), outFile);
+      fs.writeFileSync(outAbs, json, 'utf8');
+      console.log(`已輸出：${outAbs}`);
+    }
+
+    if (res.failures === res.sites.length) process.exitCode = 1;
+    return;
+  }
+
+  // ---- 以下兩個模式只讀設定 ----
   const registry = buildConnectionRegistry(cfg);
-  const anchors = loadAnchors(settings.anchorCacheFile);
 
   const { sites: allSites, primaries, derived } = deriveSites(cfg, settings);
   // 沒指定 defaultPrimary 時，用推出來的第一個非 CDS 資料庫
@@ -1269,11 +1469,7 @@ async function main() {
     );
   }
 
-  let sites = allSites.filter((s) => s.enabled !== false);
-  if (args.site) {
-    const want = args.site.split(',').map((s) => s.trim().toLowerCase());
-    sites = sites.filter((s) => want.includes(String(s.name).toLowerCase()));
-  }
+  const sites = selectSites(allSites, args.site);
   if (!sites.length) throw new Error('沒有任何 enabled 的站台');
 
   // --check-patients：專門診斷病歷號為什麼是 null，只讀資料、不輸出檔案
@@ -1337,71 +1533,14 @@ async function main() {
           (envMissing ? '  ⚠ 環境變數未設定' : '')
       );
     }
-    console.log(`\n輸出：${path.resolve(process.cwd(), outFile)}`);
+    if (toDb) {
+      console.log(`\n寫入資料庫：${sink.describeTarget(sinkSettings)}`);
+      console.log(`          設定：${sinkSettings.configFile || `${args.config} 的 "sink" 區塊`}`);
+    }
+    console.log(`\n輸出：${wantFile ? path.resolve(process.cwd(), outFile) : '不落檔（資料直接寫進上面那個資料庫）'}`);
     console.log('\n設定檢查完成。拿掉 --dry-run 即會實際連線。');
     return;
   }
-
-  console.log(`開始平行查詢 ${sites.length} 個站台...`);
-  const started = Date.now();
-
-  const settled = await Promise.allSettled(sites.map((s) => runSite(s, settings, args, registry, anchors)));
-
-  const merged = [];
-  const summary = [];
-  let failures = 0;
-
-  settled.forEach((s, i) => {
-    const name = sites[i].name;
-    if (s.status === 'fulfilled') {
-      merged.push(...s.value.rows);
-      summary.push({
-        site: name,
-        ok: true,
-        headTable: s.value.headTable,
-        tablesQueried: s.value.tablesQueried,
-        dbTimeUtc: s.value.dbTimeUtc,
-        count: s.value.count,
-        periodicRows: s.value.periodicRows,
-        aperiodicRows: s.value.aperiodicRows,
-        patientBeds: s.value.patientBeds,
-        unmatchedBeds: s.value.unmatchedBeds,
-        droppedRows: s.value.droppedRows,
-        scanMs: s.value.scanMs,
-        fetchMs: s.value.fetchMs,
-      });
-      console.log(
-        `  ✓ ${name}：${s.value.count} 筆` +
-          (s.value.aperiodicRows ? `（含非週期 ${s.value.aperiodicRows} 筆）` : '') +
-          `（${s.value.headTable}，掃描 ${s.value.scanMs}ms + 撈取 ${s.value.fetchMs}ms）`
-      );
-    } else {
-      failures++;
-      const msg = s.reason && s.reason.message ? s.reason.message : String(s.reason);
-      summary.push({ site: name, ok: false, error: msg });
-      console.error(`  ✗ ${name}：${msg}`);
-    }
-  });
-
-  // 預設輸出單一 JSON 陣列，一床一筆（與 neuro.js 同一個形狀），量測值收在 records[]。
-  // 每一筆只留下游用得到的欄位，站台 / 來源表 / parameterId 這些內部資訊不輸出。
-  // 需要各站狀態時加 --with-summary，會包成 { summary, rows }。
-  const withSummary = args.withSummary || settings.includeSummary === true;
-  saveAnchors(settings.anchorCacheFile, anchors);
-
-  const beds = groupByBed(merged);
-  const payload = withSummary ? { summary, rows: beds } : beds;
-  const json = args.pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
-  const outAbs = path.resolve(process.cwd(), outFile);
-  fs.writeFileSync(outAbs, json, 'utf8');
-
-  const secs = ((Date.now() - started) / 1000).toFixed(1);
-  console.log('----------------------------------------');
-  console.log(`合併總筆數：${merged.length} 筆，${beds.length} 床`);
-  console.log(`成功：${sites.length - failures} / ${sites.length}，耗時 ${secs}s`);
-  console.log(`已輸出：${outAbs}`);
-
-  if (failures === sites.length) process.exitCode = 1;
 }
 
 if (require.main === module) {
@@ -1413,6 +1552,12 @@ if (require.main === module) {
 
 module.exports = {
   __main: main, // 測試用：注入假的 mssql 後可直接跑主流程
+  collect, // server.js 用：撈一輪回傳結果，不寫檔
+  keepPools, // 常駐服務開連線重用
+  closePools,
+  connect,
+  release,
+  selectSites,
   discoverParameterIds,
   fetchPatients,
   indexPatientsByBed,

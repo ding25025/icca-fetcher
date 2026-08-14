@@ -45,5 +45,7 @@
     "patientSqlFile": "sql/patients.sql",
     "_comment_patientDatabase": "病人資料在哪個資料庫。不寫的話會依序試 primary 的 database、再試 CISPrimaryDB；用 node vitals.js --check-patients 可以問出實際是哪一個。",
     "patientDatabase": "CISPrimaryDB"
-  }
+  },
+
+  "_comment_sink": "中介資料庫（撈完直接寫進去的那一台）不放這個檔——設定在 sink.config.json，範例見 sink.config.example.json。這個檔的 databases[] 只放資料來源，中介庫放進來會被當成一台 primary。舊設定寫在這裡的 \"sink\" 區塊仍然讀得到，但 sink.config.json 優先。"
 }

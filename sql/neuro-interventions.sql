@@ -46,8 +46,8 @@ JOIN dbo.InterventionItem WITH (NOLOCK)
 WHERE
       i.isPrimary = 1
   AND i.terseLabel IN (
-        N'昏迷指數', N'睜眼反應', N'語言反應', N'運動反應',
-        N'瞳孔大小(右/左)', N'瞳孔對光反應(右/左)', N'眼球活動(右/左)',
+        N'昏迷指數', 
+        N'瞳孔大小(右/左)', 
         N'右上肢肌力', N'右下肢肌力', N'左上肢肌力', N'左下肢肌力'
       )
   AND EXISTS (
@@ -107,7 +107,7 @@ JOIN dbo.InterventionItem WITH (NOLOCK)
       AND InterventionItem.isPrimary = 1
 WHERE
       i.isPrimary = 1
-  AND i.terseLabel IN (N'ICDSC')
+  AND i.terseLabel IN (N'ICDSC',N'疼痛指數/評估工具')
   AND EXISTS (
       SELECT 1
       FROM dbo.Document      d  WITH (NOLOCK)
@@ -126,6 +126,31 @@ WHERE
 
 UNION
 
+Select distinct 
+i.interventionId
+,i.terseLabel
+from Intervention i 
+join InterventionItem on i.interventionId=InterventionItem.interventionId AND InterventionItem.isPrimary=1
+
+WHERE  
+   i.isPrimary = 1
+  AND i.terseLabel IN (N'FiO2 %',N'Ventilator Mode.')
+ AND EXISTS (
+      SELECT 1
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.displayLabel    = N'呼吸治療參數'
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel in (N'呼吸及檢驗紀錄表')
+        AND ar.conceptId   = i.conceptId
+  )
+  UNION
 -- 組別 4：呼吸治療參數（FiO2）
 SELECT DISTINCT
      i.interventionId
@@ -200,6 +225,63 @@ WHERE
       FROM dbo.Document      d  WITH (NOLOCK)
       JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
                                              AND fs.displayLabel    = N'生命徵象'
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel IN (N'生命徵象及治療紀錄')
+        AND ar.conceptId   = i.conceptId
+  )
+UNION
+
+-- 組別 7：Intake & Output
+SELECT DISTINCT
+     i.interventionId
+    ,i.terseLabel
+FROM dbo.Intervention i WITH (NOLOCK)
+JOIN dbo.InterventionItem WITH (NOLOCK)
+       ON i.interventionId = InterventionItem.interventionId
+      AND InterventionItem.isPrimary = 1
+WHERE
+      i.isPrimary = 1
+  AND i.terseLabel IN (N'體重-kg (每日)',N'輸入量合計 (8hr)',N'輸入量合計 (24hr)',N'排出量合計 (8hr)',N'排出量合計 (24hr)')
+  AND EXISTS (
+      SELECT 1
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.displayLabel    = N'Intake & Output'
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel IN (N'生命徵象及治療紀錄')
+        AND ar.conceptId   = i.conceptId
+  )
+
+ORDER BY terseLabel;
+
+-- 組別 8：Intake & Output
+SELECT DISTINCT
+     i.interventionId
+    ,i.terseLabel
+FROM dbo.Intervention i WITH (NOLOCK)
+JOIN dbo.InterventionItem WITH (NOLOCK)
+       ON i.interventionId = InterventionItem.interventionId
+      AND InterventionItem.isPrimary = 1
+WHERE
+      i.isPrimary = 1
+  AND i.terseLabel IN (N'體重-kg (每日)',N'輸入量合計 (8hr)',N'輸入量合計 (24hr)',N'排出量合計 (8hr)',N'排出量合計 (24hr)')
+  AND EXISTS (
+      SELECT 1
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.displayLabel    = N'Intake & Output'
                                              AND fs.isPrimary       = 1
       JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
                                              AND sl.isPrimary       = 1

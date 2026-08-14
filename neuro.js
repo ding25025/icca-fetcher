@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * 神經評估抓取工具（每小時撈有異動的病歷紀錄）
+ * 神經評估抓取工具（每 5 分鐘撈有異動的病歷紀錄）
  * -------------------------------------------------
  * 跟 vitals.js 是姊妹功能，但走的是「病歷紀錄」而非「儀器資料」，管線完全不同：
  *
@@ -13,14 +13,17 @@
  *      順便帶病歷號、床號。
  *   3. 依 (dbSqlInstance, dbName) 分組，每個 CISChartingDBxxxx 連一次，查
  *      dbo.PtIntervention：interventionId 在清單內、ptEncounterId 在該組內、
- *      且 storeTime 落在近一小時（有異動）。
+ *      且 storeTime 落在時間窗內（有異動）。
  *   4. 合併 → 併 terseLabel → 時間換算 +8 → 依病人收成一筆（病歷號 + 床號 + records[]）
- *      → 輸出單一 JSON 陣列 neuro_{ts}.json（依床號排序）。
+ *      → 輸出單一 JSON 陣列 neuro_{ts}.json（依床號排序）。設定檔有 "sink" 區塊時
+ *      改成直接寫進中介資料庫（一筆紀錄一列），不落檔——見 sink.js。
  *
  * 關鍵差異：
  *   - 病歷資料不是環狀表，是照 HostDb 分片到多個 CISChartingDB。定位靠 HostDb，不掃表。
  *   - 對應鑰匙是 ptEncounterId（病人主鍵），不是床號。
- *   - 「有異動」用 storeTime（寫入時間）＞ 近一小時，時間一律用 DB 端 GETUTCDATE()。
+ *   - 「有異動」用 storeTime（寫入時間）落在時間窗內，時間一律用 DB 端 GETUTCDATE()。
+ *     跟 vitals 一樣每 5 分鐘一輪、窗開 6 分鐘，**有新資料才寫、沒有就不寫**。
+ *     護理師事後補填或修改的紀錄 storeTime 會變新，所以照樣撈得到。
  *
  * charting 分片連線沿用 primary 的帳密與 options，只換 server=dbSqlInstance、
  * database=dbName（dbSqlInstance 帶 \ 具名執行個體時自動拆成 instanceName）。
@@ -30,7 +33,7 @@
  * 不影響 index.js / vitals.js。
  *
  * 用法：
- *   node neuro.js                 使用 databases.config.json，撈近 60 分鐘
+ *   node neuro.js                 使用 databases.config.json，撈近 6 分鐘
  *   node neuro.js --window 120    改抓近 120 分鐘
  *   node neuro.js --ids-file <檔> 用自己的 interventionId 清單，不跑 Query 1
  *   node neuro.js --utc           時間保留 UTC（預設已 +8）
@@ -44,6 +47,7 @@ const sql = require('mssql');
 const ring = require('./ring.js');
 // vitals.js 匯出的純函式直接沿用，行為與 vitals 一致
 const V = require('./vitals.js');
+const sink = require('./sink.js'); // 撈完直接寫進中介資料庫（設定檔的 "sink" 區塊）
 
 // ---------- 命令列參數 ----------
 function parseArgs(argv) {
@@ -58,6 +62,8 @@ function parseArgs(argv) {
     else if (t === '--primary-db') a.primaryDb = argv[++i];
     else if (t === '--utc') a.utc = true;
     else if (t === '--dry-run' || t === '-n') a.dryRun = true;
+    else if (t === '--to-db') a.toDb = true;
+    else if (t === '--no-db') a.noDb = true;
     else if (t === '--with-summary') a.withSummary = true;
     else if (t === '--help' || t === '-h') a.help = true;
   }
@@ -66,7 +72,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-神經評估抓取工具（每小時撈有異動的病歷紀錄）
+神經評估抓取工具（每 5 分鐘撈有異動的病歷紀錄）
 
   node neuro.js [選項]
 
@@ -74,11 +80,13 @@ function printHelp() {
   -c, --config <檔案>   設定檔（預設 databases.config.json）
   -o, --out <檔案>      輸出 JSON 檔（預設 neuro_{ts}.json，到分鐘）
                         檔名裡寫 {ts} 會換成時間戳，例如 neuro_{ts}.json
-  -w, --window <分鐘>   撈 storeTime 落在最近幾分鐘的（預設 60，即近一小時）
+  -w, --window <分鐘>   撈 storeTime 落在最近幾分鐘的（預設 6＝5 分鐘一輪多留 1 分鐘）
       --ids-file <檔>   用自己的 interventionId 清單（GUID，逗號/換行分隔，可帶標籤），
                         指定後就不跑 sql/neuro-interventions.sql
       --primary-db <名> primary 要連哪個資料庫（預設讀 SQL 裡的 USE，再試 CISPrimaryDB）
       --utc             時間保留 DB 原始的 UTC 值（預設已換算成本地 +8）
+      --to-db           撈完直接寫進中介資料庫（設定檔的 sink 區塊），不落 JSON 檔
+      --no-db           這一次不要寫資料庫（sink.enabled 為 true 時用來臨時關掉）
       --with-summary    輸出包成 { summary, rows }（預設是單純的資料陣列）
   -n, --dry-run         只檢查設定，不連資料庫
   -p, --pretty          美化縮排輸出
@@ -97,8 +105,10 @@ const DEFAULTS = {
   output: 'neuro_{ts}.json',
   queryTimeoutMs: 60000,
   lockTimeoutMs: 3000,
-  // 「有異動」的時間窗（分鐘）；storeTime >= 近 windowMinutes 分鐘。預設 60＝近一小時。
-  windowMinutes: 60,
+  // 「有異動」的時間窗（分鐘）；storeTime >= 近 windowMinutes 分鐘。
+  // 預設 6：跟 vitals 一樣每 5 分鐘跑一輪，窗比間隔多 1 分鐘（重疊的部分寫入時會被擋掉，
+  // 漏掉的下一輪不會自己補回來，兩種風險不對等）。有新資料才寫，沒有就不寫。
+  windowMinutes: 6,
   timesInUtc: false,
   displayTimezoneOffsetHours: 8,
   interventionSqlFile: 'sql/neuro-interventions.sql',
@@ -120,25 +130,10 @@ function mergeSettings(cfg) {
 }
 
 // ---------- 連線 ----------
-function resolveSecret(value) {
-  if (typeof value === 'string' && value.startsWith('env:')) {
-    const key = value.slice(4);
-    const v = process.env[key];
-    if (v === undefined) throw new Error(`環境變數 ${key} 未設定`);
-    return v;
-  }
-  return value;
-}
-
-async function connect(connection, queryTimeoutMs) {
-  const conn = { ...connection };
-  if (conn.password) conn.password = resolveSecret(conn.password);
-  if (conn.user) conn.user = resolveSecret(conn.user);
-  if (queryTimeoutMs) conn.requestTimeout = queryTimeoutMs;
-  const pool = new sql.ConnectionPool(conn);
-  await pool.connect();
-  return pool;
-}
+// 連線池的建立 / 釋放沿用 vitals.js 那一份（"env:" 密碼、CLI 用完就關、
+// server.js 呼叫 keepPools() 後改成重複使用），兩支工具共用同一組池。
+const connect = V.connect;
+const release = V.release;
 
 function safeIdent(name, label) {
   if (!/^[A-Za-z0-9_]+$/.test(String(name))) throw new Error(`${label} 含有不允許的字元：${name}`);
@@ -262,9 +257,11 @@ SELECT
      ptEncounterId
     ,interventionId
     ,terseForm
+    ,verboseForm
     ,storeTime
     ,addTime
     ,chartTime
+    ,isDeleted
 FROM dbo.[${table}] WITH (NOLOCK)
 WHERE storeTime >= DATEADD(MINUTE, -@win, GETUTCDATE())
   AND interventionId IN (${iParams})
@@ -325,7 +322,7 @@ async function runPrimary(primary, candidates, { intSql, encSql, wantInterventio
     } catch (e) {
       errors.push({ database, message: e.message });
     } finally {
-      if (pool) { try { await pool.close(); } catch (_) {} }
+      await release(pool);
     }
   }
   return { database: null, errors };
@@ -340,21 +337,22 @@ async function runGroup(group, { interventionIds, windowMinutes, template, setti
     const rows = await fetchNeuro(pool, { interventionIds, encounterIds, windowMinutes, settings });
     return { dbSqlInstance, dbName, encounters: encounterIds.length, count: rows.length, rows };
   } finally {
-    try { await pool.close(); } catch (_) {}
+    await release(pool);
   }
 }
 
-// ---------- 主流程 ----------
-async function main() {
-  const args = parseArgs(process.argv);
-  if (args.help) return printHelp();
+// ---------- 撈一輪（命令列與 server.js 共用）----------
 
+/**
+ * 把設定攤開：連線、SQL 檔、時間窗都在這裡解析完，連一次線都還沒連。
+ * --dry-run 與實際執行看到的是同一份結果，不會有「檢查過了但跑起來不一樣」。
+ */
+function prepare(args) {
   const cfg = V.loadConfig(args.config);
   const settings = mergeSettings(cfg);
   const offset = settings.displayTimezoneOffsetHours != null ? settings.displayTimezoneOffsetHours : 8;
-  const outFile = V.resolveOutputName(args.out || settings.output, offset);
   const registry = V.buildConnectionRegistry(cfg);
-  const windowMinutes = args.window || settings.windowMinutes || 60;
+  const windowMinutes = args.window || settings.windowMinutes || DEFAULTS.windowMinutes;
   const timeout = settings.queryTimeoutMs || 60000;
 
   // primary：名稱不符合 CDS pattern 的當 primary
@@ -384,21 +382,18 @@ async function main() {
   // primary 連哪個資料庫：沿用 vitals 的候選邏輯（USE > 設定 > primary.database > fallback）
   const candidates = V.patientDatabaseCandidates(encSql, primary, {}, settings, args.primaryDb);
 
-  // --dry-run：攤開設定，不連線
-  if (args.dryRun) {
-    console.log(`\n[dry-run] 不會連線，只檢查設定\n`);
-    console.log(`primary：${primaryRef}（${primary.server}:${primary.port || 1433}）`);
-    console.log(`  候選資料庫：${candidates.join(' → ')}`);
-    console.log(`interventionId 來源：${args.idsFile ? args.idsFile + `（${idsFromFile.ids.length} 個）` : settings.interventionSqlFile + '（連線時跑 Query 1）'}`);
-    console.log(`在床病人 SQL：${settings.encountersSqlFile}`);
-    console.log(`病歷紀錄表：dbo.${settings.table}（依 HostDb 分片，連線時才知道有幾個）`);
-    console.log(`時間窗：storeTime 近 ${windowMinutes} 分鐘（用 DB 端 GETUTCDATE()）`);
-    console.log(`輸出：${path.resolve(process.cwd(), outFile)}`);
-    console.log(`\n設定檢查完成。拿掉 --dry-run 即會實際連線。`);
-    return;
-  }
+  return { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, idsFromFile, candidates };
+}
 
-  const started = Date.now();
+/**
+ * 撈一輪並回傳結果。不讀命令列、不寫檔，所以 server.js 可以直接呼叫。
+ * 回傳 { settings, offset, summary, rows, total, groups, failures }，
+ * rows 是一位病人一筆（{ lifetimeNumber, bed, records: [...] }），依床號自然排序。
+ */
+async function collect(opts = {}, prep = null) {
+  const args = { config: 'databases.config.json', ...opts };
+  const p = prep || prepare(args);
+  const { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, candidates } = p;
 
   // 1+2. primary：interventionId 清單 + 在床病人 + HostDb 分組
   console.log(`連 primary（${primaryRef}）查 interventionId 與在床病人...`);
@@ -409,13 +404,17 @@ async function main() {
     timeout
   );
   if (!pr.database) {
-    console.error(`✗ primary 查詢失敗，候選資料庫都不通：`);
-    for (const e of pr.errors) console.error(`    ${e.database}：${e.message}`);
-    console.error(`  若錯誤是「無效的物件名稱 dbo.PtLocationStay」，表示連錯資料庫，`);
-    console.error(`  在 SQL 檔開頭寫 USE <資料庫> 或用 --primary-db <資料庫>。`);
-    process.exitCode = 1;
-    return;
+    const err = new Error(
+      `primary 查詢失敗，候選資料庫都不通：` +
+        pr.errors.map((e) => `\n    ${e.database}：${e.message}`).join('')
+    );
+    err.hint =
+      '若錯誤是「無效的物件名稱 dbo.PtLocationStay」，表示連錯資料庫，\n' +
+      '  在 SQL 檔開頭寫 USE <資料庫> 或用 --primary-db <資料庫>。';
+    throw err;
   }
+
+  const idsFromFile = p.idsFromFile;
 
   const interventions = args.idsFile ? idsFromFile : pr.interventions;
   const interventionIds = interventions.ids;
@@ -461,15 +460,23 @@ async function main() {
             bed: pt.bed != null ? pt.bed : null,
             records: [],
           };
+          // 寫進 sink 時要一個穩定的病人鑰匙：病歷號可能沒填、床號會因轉床而變，
+          // 只有 ptEncounterId 從頭到尾不動。掛成不可列舉的屬性，JSON.stringify
+          // 看不到它，輸出格式跟以前一模一樣。
+          Object.defineProperty(p, '_encounterId', { value: encKey, enumerable: false });
           byPatient.set(encKey, p);
         }
         const rec = {
           interventionId: r.interventionId,
           terseLabel: labelOf(r.interventionId),
           terseForm: r.terseForm,
+          verboseForm: r.verboseForm,
           storeTime: r.storeTime,
           addTime: r.addTime,
           chartTime: r.chartTime,
+          // 作廢註記：ICCA 那筆被刪除／作廢時是 1。**不在這裡過濾掉**——
+          // 下游要看得到「這筆沒了」這個變化，過濾是呈現時才做的事（規格 §4）。
+          isDeleted: r.isDeleted ? 1 : 0,
         };
         p.records.push(useUtc ? rec : shiftTimes(rec, offset));
       }
@@ -487,30 +494,76 @@ async function main() {
   // 用 vitals.js 那支自然排序，ICU-10 才不會排到 ICU-2 前面，兩支輸出順序也一致。
   const merged = [...byPatient.values()].sort((a, b) => V.compareBeds(a.bed, b.bed));
 
-  const withSummary = args.withSummary || settings.includeSummary === true;
-  const payload = withSummary ? { summary, rows: merged } : merged;
-  const json = args.pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
-  const outAbs = path.resolve(process.cwd(), outFile);
-  fs.writeFileSync(outAbs, json, 'utf8');
+  return { settings, offset, summary, rows: merged, total, groups: groups.length, failures, primaryDatabase: pr.database };
+}
+
+// ---------- 主流程 ----------
+async function main() {
+  const args = parseArgs(process.argv);
+  if (args.help) return printHelp();
+
+  const p = prepare(args);
+  const outFile = V.resolveOutputName(args.out || p.settings.output, p.offset);
+
+  // 中介資料庫（sink）：有設定就直接寫進去，不再落 JSON 檔
+  const sinkSettings = sink.mergeSettings(V.loadConfig(args.config));
+  const toDb = sink.wanted(sinkSettings, args);
+  if (toDb) sink.assertConfigured(sinkSettings); // 連線沒設好就別讓它撈完一輪才發現
+  const wantFile = !toDb || !!args.out || sinkSettings.alsoWriteFile === true;
+
+  // --dry-run：攤開設定，不連線
+  if (args.dryRun) {
+    console.log(`\n[dry-run] 不會連線，只檢查設定\n`);
+    console.log(`primary：${p.primaryRef}（${p.primary.server}:${p.primary.port || 1433}）`);
+    console.log(`  候選資料庫：${p.candidates.join(' → ')}`);
+    console.log(`interventionId 來源：${args.idsFile ? args.idsFile + `（${p.idsFromFile.ids.length} 個）` : p.settings.interventionSqlFile + '（連線時跑 Query 1）'}`);
+    console.log(`在床病人 SQL：${p.settings.encountersSqlFile}`);
+    console.log(`病歷紀錄表：dbo.${p.settings.table}（依 HostDb 分片，連線時才知道有幾個）`);
+    console.log(`時間窗：storeTime 近 ${p.windowMinutes} 分鐘（用 DB 端 GETUTCDATE()）`);
+    if (toDb) console.log(`寫入資料庫：${sink.describeTarget(sinkSettings)}`);
+    console.log(`輸出：${wantFile ? path.resolve(process.cwd(), outFile) : '不落檔（資料直接寫進上面那個資料庫）'}`);
+    console.log(`\n設定檢查完成。拿掉 --dry-run 即會實際連線。`);
+    return;
+  }
+
+  const started = Date.now();
+  const res = await collect(args, p);
 
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   console.log('----------------------------------------');
-  console.log(`合併總筆數：${total} 筆，${merged.length} 位病人`);
-  console.log(`成功：${groups.length - failures} / ${groups.length} 個 charting 資料庫，耗時 ${secs}s`);
-  console.log(`已輸出：${outAbs}`);
+  console.log(`合併總筆數：${res.total} 筆，${res.rows.length} 位病人`);
+  console.log(`成功：${res.groups - res.failures} / ${res.groups} 個 charting 資料庫，耗時 ${secs}s`);
 
-  if (groups.length && failures === groups.length) process.exitCode = 1;
+  // 分片全滅時不要寫：那是 0 筆，寫進去只會讓下游把故障看成「這一輪沒有異動」
+  if (toDb && !(res.groups && res.failures === res.groups)) {
+    const stats = await sink.writeNeuro(res.rows, sinkSettings);
+    console.log(`已寫入 ${sink.describe(stats)}`);
+  }
+
+  if (wantFile) {
+    const withSummary = args.withSummary || res.settings.includeSummary === true;
+    const payload = withSummary ? { summary: res.summary, rows: res.rows } : res.rows;
+    const json = args.pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
+    const outAbs = path.resolve(process.cwd(), outFile);
+    fs.writeFileSync(outAbs, json, 'utf8');
+    console.log(`已輸出：${outAbs}`);
+  }
+
+  if (res.groups && res.failures === res.groups) process.exitCode = 1;
 }
 
 if (require.main === module) {
   main().catch((err) => {
     console.error(`\n發生錯誤：${err.message}`);
+    if (err.hint) console.error(`  ${err.hint}`);
     process.exitCode = 1;
   });
 }
 
 module.exports = {
   __main: main,
+  collect, // server.js 用：撈一輪回傳結果，不寫檔
+  prepare,
   indexInterventions,
   loadIdsFile,
   indexEncounters,
