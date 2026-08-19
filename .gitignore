@@ -31,5 +31,10 @@ Thumbs.db
 # 表號錨點快取（純快取，刪掉只會讓下次重新掃描）
 .ring-anchors.json
 
+# 執行狀態（最後一次成功寫進中介資料庫的時間，見 state.js）
+# 每台部署各自的紀錄，不進版控；刪掉只會失去「該從幾點補」的起點
+.sink-state.json
+.sink-state.json.tmp
+
 # ---- 文件只維護 HTML；PDF 是匯出的產物，不進版控也不要再產 ----
 *.pdf

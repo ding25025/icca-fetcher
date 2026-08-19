@@ -14,7 +14,7 @@
  * 不重寫任何環狀 / 時區 / 過濾的判斷。
  *
  * 端點（皆為 GET）：
- *   /health                 探活，不碰資料庫
+ *   /health                 探活，不碰資料庫（含各資料最後一次成功寫入的時間）
  *   /icca/head              目前寫入頭是哪一張表
  *   /icca/order             26 張表由新到舊的順序與各表狀態
  *   /icca/latest            從 head 跨表撈最新 N 筆（原始列，ring.js）
@@ -41,6 +41,7 @@
  *     ICCA_HOST     監聽位址（預設 127.0.0.1，只給本機的 Rhapsody 用）
  *     ICCA_PORT     監聽埠（預設 8770）
  *     ICCA_TOKEN    若設定，呼叫需帶 X-API-Key 或 ?token=
+ *     ICCA_STATE    執行狀態檔路徑（預設 .sink-state.json，見 state.js）
  *     DB_PASSWORD   資料庫密碼（設定檔用 "env:DB_PASSWORD" 參照）
  */
 
@@ -52,6 +53,7 @@ const ring = require('./ring.js');
 const vitals = require('./vitals.js');
 const neuro = require('./neuro.js');
 const sink = require('./sink.js');
+const state = require('./state.js'); // 記錄每一種資料最後一次成功寫入的時間
 
 // vitals / neuro 原本是「跑一次就結束」的命令列工具，連完就把池關掉。
 // 常駐服務要的是相反：同一個 server/database 只連一次，之後每次呼叫都用溫熱的連線。
@@ -350,22 +352,38 @@ function pushWindow(kind, q) {
 
 async function pushVitals(q = {}) {
   if (!SINK_ON) throw httpError(400, '設定檔沒有啟用 sink（databases.config.json 的 "sink" 區塊，enabled: true）');
-  const res = await serialize('vitals', () =>
-    vitals.collect({ config: CONFIG_PATH, window: pushWindow('vitals', q), site: q.site || null })
-  );
-  failIfAllDown(res.failures, res.sites.length, res.summary, (s) => s.site);
-  const stats = await sink.writeVitals(res.rows, SINK);
-  return { kind: 'vitals', beds: res.rows.length, fetched: res.total, ...stats };
+  // 開始撈的時間就是「補的時候要從這裡開始」的那個點，先記下來（見 state.js）
+  const startedAtMs = Date.now();
+  try {
+    const res = await serialize('vitals', () =>
+      vitals.collect({ config: CONFIG_PATH, window: pushWindow('vitals', q), site: q.site || null })
+    );
+    failIfAllDown(res.failures, res.sites.length, res.summary, (s) => s.site);
+    const stats = await sink.writeVitals(res.rows, SINK);
+    // ?site= 只跑部分站台，那不是完整的一輪，記了會讓水位線假性前進，所以跳過
+    if (!q.site) state.recordSuccess('vitals', { startedAtMs, stats });
+    return { kind: 'vitals', beds: res.rows.length, fetched: res.total, ...stats };
+  } catch (e) {
+    state.recordFailure('vitals', e.message);
+    throw e;
+  }
 }
 
 async function pushNeuro(q = {}) {
   if (!SINK_ON) throw httpError(400, '設定檔沒有啟用 sink（databases.config.json 的 "sink" 區塊，enabled: true）');
-  const res = await serialize('neuro', () =>
-    neuro.collect({ config: CONFIG_PATH, window: pushWindow('neuro', q) })
-  );
-  failIfAllDown(res.failures, res.groups, res.summary, (s) => s.db);
-  const stats = await sink.writeNeuro(res.rows, SINK);
-  return { kind: 'neuro', patients: res.rows.length, fetched: res.total, ...stats };
+  const startedAtMs = Date.now();
+  try {
+    const res = await serialize('neuro', () =>
+      neuro.collect({ config: CONFIG_PATH, window: pushWindow('neuro', q) })
+    );
+    failIfAllDown(res.failures, res.groups, res.summary, (s) => s.db);
+    const stats = await sink.writeNeuro(res.rows, SINK);
+    state.recordSuccess('neuro', { startedAtMs, stats });
+    return { kind: 'neuro', patients: res.rows.length, fetched: res.total, ...stats };
+  } catch (e) {
+    state.recordFailure('neuro', e.message);
+    throw e;
+  }
 }
 
 /**
@@ -436,6 +454,14 @@ const ROUTES = {
 };
 
 // ---------- 小工具 ----------
+/** 狀態檔摘要。補撈的餘裕跟排程用的是同一個 windowSlackMinutes */
+function stateReport() {
+  const sc = SINK.schedule || {};
+  return state.report(['vitals', 'neuro'], {
+    slackMinutes: sc.windowSlackMinutes != null ? sc.windowSlackMinutes : 1,
+  });
+}
+
 function httpError(status, message) {
   const e = new Error(message);
   e.status = status;
@@ -481,12 +507,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 健康檢查：不碰資料庫，也不需要 token
+  // lastWrite 是從狀態檔讀的（不連 DB），發現問題時第一個看這裡：
+  // 上次成功幾點、離現在多久、要補的話該下多大的 --window
   if (u.pathname === '/health') {
     return send(res, 200, {
       status: 'ok',
       uptimeSec: Math.round(process.uptime()),
       pools: [...pools.keys()],
       config: CONFIG_PATH,
+      stateFile: SINK_ON ? state.filePath() : null,
+      lastWrite: SINK_ON ? stateReport() : null,
     }, pretty);
   }
 
@@ -521,6 +551,12 @@ server.listen(PORT, HOST, () => {
   console.log(`  端點：/health ${Object.keys(ROUTES).join(' ')}`);
   console.log(`  存取控制：${TOKEN ? '需要 X-API-Key / ?token=' : '未設 token（僅綁 ' + HOST + '）'}`);
   console.log(`  寫入資料庫：${SINK_ON ? sink.describeTarget(SINK) : '未啟用（沒有 sink.config.json 或 enabled 不是 true）'}`);
+
+  if (SINK_ON) {
+    // 重啟之後最想知道的就是「停了多久、缺口多大」，不必等人去打 /health
+    const r = stateReport();
+    for (const kind of Object.keys(r)) console.log(`  ${state.describe(kind, r[kind])}`);
+  }
 
   schedule = startSchedule();
   if (schedule.length) {

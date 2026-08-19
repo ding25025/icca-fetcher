@@ -84,7 +84,7 @@ GET /icca/push/neuro?window=180
 
 | 路徑 | 說明 | 對應 ring.js 模式 |
 |------|------|------------------|
-| `/health` | 探活，不碰資料庫 | — |
+| `/health` | 探活，不碰資料庫；`lastWrite` 帶各資料**最後一次成功寫入**的時間與建議補撈的窗 | — |
 | `/icca/head` | 目前寫入頭是哪一張表 | head |
 | `/icca/order` | 26 張表由新到舊順序與各表狀態 | order |
 | `/icca/latest` | 從 head 跨表撈最新 N 筆的原始列 | latest |
@@ -114,14 +114,47 @@ GET /icca/at?at=2026-07-22%2003:00&fetch=1&param=4102
 
 ## 補資料
 
-服務端每一輪都是撈「最近 N 分鐘」，某一輪掛掉不會自己補回來。因為寫入時已經在表裡的資料不會再寫一次（生命徵象比對唯一鍵、神經評估比對內容雜湊），**補的方法就是把窗開大再打一次**，重複的部分會被吃掉：
+服務端每一輪都是撈「最近 N 分鐘」，某一輪掛掉不會自己補回來。因為寫入時已經在表裡的資料不會再寫一次（生命徵象比對唯一鍵、神經評估比對內容雜湊），**補的方法就是把窗開大再打一次**，重複的部分會被吃掉。
+
+### 先看「上次成功是幾點」
+
+每一輪成功寫入後，時間會記在 `.sink-state.json`（工作目錄下，路徑可用 `ICCA_STATE` 換；見 `state.js`）。這是為了回答補資料時唯一重要的問題：**該從幾點開始撈**。發現問題時先打 `/health`：
 
 ```bat
-curl "http://127.0.0.1:8770/icca/push/vitals?window=120"
+curl "http://127.0.0.1:8770/health?pretty=1"
+```
+
+```json
+"lastWrite": {
+  "vitals": {
+    "lastSuccessAt": "2026-08-18 09:12:03",
+    "ageMinutes": 143,
+    "suggestWindowMinutes": 144,
+    "maxBackfillHours": 24,
+    "gapBeyondBackfill": false,
+    "lastError": null
+  }
+}
+```
+
+- `lastSuccessAt` 是**那一輪開始撈的時間**，不是寫完的時間——從這個點往後補才不會漏掉「撈完到寫完」之間進來的資料。
+- `suggestWindowMinutes` 直接就是要下的 `window`（已含餘裕）。
+- 失敗不會讓 `lastSuccessAt` 前進，缺口才看得出來；最後一次的錯誤訊息記在 `lastError`。
+- 服務啟動時也會把這兩行印進 log，重啟後不必特地去查就知道停了多久。
+- **部分**站台失敗的那一輪仍算成功（資料有進去，水位線照樣前進）。那一站自己的缺口不在這裡看——看服務 log 的警告，或 `&withSummary=1` 的逐站狀態。
+
+檔案是純紀錄，**排程行為完全不受影響**——開多大的窗還是人決定。刪掉它只會失去這個起點，不影響撈取。
+
+### 再把窗開大打一次
+
+```bat
+curl "http://127.0.0.1:8770/icca/push/vitals?window=144"
 curl "http://127.0.0.1:8770/icca/push/neuro?window=1440"
 ```
 
-生命徵象只補得到環狀表還留著的範圍（約 26 小時，`/icca/order` 可以看目前涵蓋到哪），神經評估在 charting 資料庫裡則沒有這個限制。
+**最多補 24 小時。** 生命徵象的來源是環狀表，26 張、一張約一小時，再往前就被覆蓋了（`/icca/order` 可以看目前實際涵蓋到哪）；神經評估在 charting 資料庫裡雖然沒有被覆蓋的問題，也照同一個上限走，一次開太大的窗會壓到正式機。缺口超過 24 小時時 `gapBeyondBackfill` 會是 `true`，`suggestWindowMinutes` 封在 1440——超出的那一段補不回來，只能記錄下來。
+
+上限要調就設環境變數 `ICCA_MAX_BACKFILL_HOURS`。
 
 ## 環境變數
 
@@ -132,6 +165,8 @@ curl "http://127.0.0.1:8770/icca/push/neuro?window=1440"
 | `ICCA_HOST` | `127.0.0.1` | 監聽位址；只綁本機，別對外網開 |
 | `ICCA_PORT` | `8770` | 監聽埠 |
 | `ICCA_TOKEN` | 無 | 有設定時，呼叫需帶 `X-API-Key` 標頭或 `?token=` |
+| `ICCA_STATE` | `.sink-state.json` | 執行狀態檔路徑（最後一次成功寫入的時間） |
+| `ICCA_MAX_BACKFILL_HOURS` | `24` | 補資料的上限，只影響 `/health` 給的建議值 |
 | `DB_PASSWORD` | — | 來源資料庫密碼（設定檔用 `"env:DB_PASSWORD"` 參照） |
 | `SINK_PASSWORD` | — | 中介資料庫密碼（同上，變數名就是你在 `sink.config.json` 的 `connection.password` 寫的那個） |
 
@@ -231,6 +266,9 @@ node vitals.js
 
 時間窗有重疊，所以第二次**應該幾乎全是重複**：`written` 掉到只剩這一分鐘的新資料、
 `重複略過` 是個大數字。兩次寫進一樣多筆＝鑰匙沒對上，去查 `PK_CDSUnvalidatedData` 在不在。
+
+順便確認狀態檔出來了：工作目錄下該多一個 `.sink-state.json`，`vitals.startedAt`
+就是剛剛那一輪開始撈的時間。之後發現問題要補資料，起點看它（見上面的[補資料](#補資料)）。
 
 ### 6. 直接查表驗結構與下游查詢
 

@@ -48,6 +48,7 @@ const ring = require('./ring.js');
 // vitals.js 匯出的純函式直接沿用，行為與 vitals 一致
 const V = require('./vitals.js');
 const sink = require('./sink.js'); // 撈完直接寫進中介資料庫（設定檔的 "sink" 區塊）
+const state = require('./state.js'); // 記錄最後一次成功寫入的時間
 
 // ---------- 命令列參數 ----------
 function parseArgs(argv) {
@@ -520,7 +521,11 @@ async function main() {
     console.log(`在床病人 SQL：${p.settings.encountersSqlFile}`);
     console.log(`病歷紀錄表：dbo.${p.settings.table}（依 HostDb 分片，連線時才知道有幾個）`);
     console.log(`時間窗：storeTime 近 ${p.windowMinutes} 分鐘（用 DB 端 GETUTCDATE()）`);
-    if (toDb) console.log(`寫入資料庫：${sink.describeTarget(sinkSettings)}`);
+    if (toDb) {
+      console.log(`寫入資料庫：${sink.describeTarget(sinkSettings)}`);
+      console.log(`狀態檔：${state.filePath()}`);
+      console.log(`        ${state.describe('neuro', state.report(['neuro']).neuro)}`);
+    }
     console.log(`輸出：${wantFile ? path.resolve(process.cwd(), outFile) : '不落檔（資料直接寫進上面那個資料庫）'}`);
     console.log(`\n設定檢查完成。拿掉 --dry-run 即會實際連線。`);
     return;
@@ -538,6 +543,8 @@ async function main() {
   if (toDb && !(res.groups && res.failures === res.groups)) {
     const stats = await sink.writeNeuro(res.rows, sinkSettings);
     console.log(`已寫入 ${sink.describe(stats)}`);
+    // 記下「最後一次成功寫入」，之後要補撈才知道從幾點開始（見 state.js）
+    state.recordSuccess('neuro', { startedAtMs: started, stats });
   }
 
   if (wantFile) {

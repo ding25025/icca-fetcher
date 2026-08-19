@@ -46,6 +46,7 @@ const path = require('path');
 const sql = require('mssql');
 const ring = require('./ring.js');
 const sink = require('./sink.js'); // 撈完直接寫進中介資料庫（設定檔的 "sink" 區塊）
+const state = require('./state.js'); // 記錄最後一次成功寫入的時間
 
 // ---------- 命令列參數 ----------
 function parseArgs(argv) {
@@ -1439,6 +1440,9 @@ async function main() {
     if (toDb && res.failures < res.sites.length) {
       const stats = await sink.writeVitals(res.rows, sinkSettings);
       console.log(`已寫入 ${sink.describe(stats)}`);
+      // 記下「最後一次成功寫入」，之後要補撈才知道從幾點開始（見 state.js）。
+      // --site 只跑部分站台，那不是完整的一輪，記了會讓水位線假性前進，所以跳過。
+      if (!args.site) state.recordSuccess('vitals', { startedAtMs: started, stats });
     }
 
     if (wantFile) {
@@ -1536,6 +1540,8 @@ async function main() {
     if (toDb) {
       console.log(`\n寫入資料庫：${sink.describeTarget(sinkSettings)}`);
       console.log(`          設定：${sinkSettings.configFile || `${args.config} 的 "sink" 區塊`}`);
+      console.log(`          狀態：${state.filePath()}`);
+      console.log(`                ${state.describe('vitals', state.report(['vitals']).vitals)}`);
     }
     console.log(`\n輸出：${wantFile ? path.resolve(process.cwd(), outFile) : '不落檔（資料直接寫進上面那個資料庫）'}`);
     console.log('\n設定檢查完成。拿掉 --dry-run 即會實際連線。');
