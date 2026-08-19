@@ -1,4 +1,5 @@
 <!doctype html>
+
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
@@ -781,6 +782,65 @@
         <li><b>表名與欄位要不要改</b>——目前是 <code>CDSUnvalidatedData</code> / <code>CISData</code>，欄位沿用撈出來的原名。下游若已經有既定的命名慣例，現在改最便宜（改 <code>sink.js</code> 的 spec，重新產一次 DDL）。</li>
         <li><b>舊資料保留多久</b>——一天約 50 萬列，清理由院方排程做，但期限要看下游要不要自己留一份：下游會完整複製走的話這裡設短一點（3 天）就夠，中介庫只當緩衝；不複製的話至少 7 天。規格書 §6 Q2 已經把這題丟給下游回答。</li>
       </ul>
+    </div>
+  </section>
+
+  <!-- ======== 附錄：Rhapsody IBE ======== -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">附錄 · 為什麼不走整合引擎</p>
+      <h2>Rhapsody IBE 來拉這條路不適合，原因在這裡</h2>
+      <p class="note">
+        原本的設計是 Rhapsody 用兩條 route 定時打本機的 HTTP 端點要 JSON，轉格式後 POST 出去。
+        2026-08-06 拿掉了，改成服務自己寫資料庫。不是因為接不起來——是接起來之後，
+        下面這幾件事沒有一件能靠 route 設定解決，全部得在兩端各補一套邏輯。
+        <code>/icca/push/*</code> 留著給外部排程器或手動補撈用，前兩點在那種用法下還是會遇到。
+      </p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="tag" style="--tone: var(--crit);">冷啟</span>
+        <h3>用 Execute comm point 跑 node 划不來</h3>
+        <p>每次觸發都要冷啟行程、重連 SQL Server、重建連線池——生命徵象要平行開 7 站，環狀表那邊是 26 張表的連線。
+          常駐服務的連線池是溫熱的，一輪 0.9 秒；每五分鐘重建一次，光連線就吃掉大半。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--crit);">逾時</span>
+        <h3>呼叫端斷線，兩邊對「這輪成功沒」講法不一樣</h3>
+        <p>timeout 要設到 60 秒才夠。但只要它先斷，服務端這一輪還是照跑完——引擎那邊記成失敗會重送，
+          資料其實早就進去了。這個落差在 HTTP 拉取的模型裡消不掉，只能靠去重擋。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--crit);">重送</span>
+        <h3>重送不會炸資料庫，但會把時間疊上去</h3>
+        <p>同一個端點被打第二次，第二個請求<b>排隊</b>等第一輪跑完，不會兩輪同時打 DB。
+          代價是逾時重送反而讓下一輪更晚拿到回應，越忙越慢。內建排程相反——上一輪沒結束就直接跳過。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--warn);">錯誤語意</span>
+        <h3>失敗全被壓成一個狀態碼</h3>
+        <p>全滅回 <code>502</code>、部分失敗照樣 <code>200</code>，哪幾站掉了要另外加
+          <code>&amp;withSummary=1</code> 才看得到。引擎只認得「2xx 或不是」，
+          「有幾站掛了」這層資訊在 route 裡沒地方放。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--warn);">補資料</span>
+        <h3>送失敗那批不會自己回來</h3>
+        <p>服務端每輪只撈「最近 N 分鐘」，某一輪 POST 失敗，那批資料下一輪撈不到了。
+          補的責任落在引擎端：要嘛自己記住重送，要嘛回頭把 <code>window</code> 開大重打——兩種都得額外寫。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--warn);">訊息大小</span>
+        <h3>整批一次 POST，全有或全無</h3>
+        <p>一輪一則訊息，不會有「送了 30 床、剩 20 床失敗」的中間狀態，重送成本就是整批重送。
+          兩支同機走 loopback，所以瓶頸不在頻寬，而在引擎的 max message size 與 timeout。</p>
+      </div>
+      <div class="card">
+        <span class="tag" style="--tone: var(--spine);">結論</span>
+        <h3>直接寫資料庫把上面六題一起消掉</h3>
+        <p>去重在寫入那一刻就做完，失敗就下一輪再試，沒有訊息大小上限，也沒有開機順序問題。
+          更重要的是少了三個可能斷掉的環節：中間格式、整合引擎、訊息佇列。</p>
+      </div>
     </div>
   </section>
 
