@@ -201,9 +201,8 @@ const NEURO_SPEC = {
     // 病歷號不進自然鍵（同一位病人的鑰匙是 ptEncounterId），但一律要有值：
     // 查不到病歷號的列整列不寫——見 writeRows。床號不寫進表（轉床會變動）。
     { name: 'lifetimeNumber', type: 'NVARCHAR(32)', kind: 'text', notNull: true, required: true },
-    // 項目名。長度照規格 §3 的 32——項目是開放清單，真的出現更長的標籤會被截斷，
-    // 但不會默默發生：valuesOf 會計數，每一輪的結果訊息就印「⚠ 過長截斷 N」。
-    // 看到那個警告就表示規格的 32 不夠，要回頭談欄位放寬。
+    // 項目名。32 是照 ICCA 來源端的欄寬設的（規格 §3 也是 32），來源不會更長，
+    // 所以這一欄不會截斷。valuesOf 的截斷計數是所有文字欄共用的保險，不是為它準備的。
     { name: 'terseLabel', type: 'NVARCHAR(32)', kind: 'text' },
     // terseForm 是不帶單位的原始值（E4V5M6、37.2）；verboseForm 是含單位／完整敘述的版本
     { name: 'terseForm', type: 'NVARCHAR(32)', kind: 'text' },

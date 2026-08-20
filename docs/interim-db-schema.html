@@ -947,7 +947,7 @@
   <section style="--ch: var(--ch-b);">
     <div class="section-head">
       <div class="num-title"><span class="n">03</span><h2>資料表二：神經評估或其他臨床資料</h2></div>
-      <p class="note">護理師填在表單上的紀錄都走這張表，項目不限於神經評估。</p>
+      <p class="note">護理師填在表單上的紀錄、以及鎮靜與升壓藥物的醫囑紀錄都走這張表，項目不限於神經評估。</p>
     </div>
 
     <div class="dataset">
@@ -966,22 +966,42 @@
 
       <div class="callout warn">
         <p><b>本表不只神經評估。</b>裝的是「護理師填在表單上的紀錄」，
-          依<b>資料來源</b>而不是臨床領域分表——所以呼吸照護與體溫也在這裡：</p>
+          依<b>資料來源</b>而不是臨床領域分表——所以呼吸照護、體溫、輸出入量、
+          CRRT／ECMO 也都在這裡：</p>
         <div class="table-scroll" style="margin-top: 4px;">
           <table>
             <thead><tr><th>領域</th><th>項目</th><th>項數</th></tr></thead>
             <tbody>
-              <tr><td>神經評估</td><td>昏迷指數、瞳孔大小、四肢肌力</td><td class="num">6</td></tr>
-              <tr><td>鎮靜／譫妄</td><td>RASS 分數、ICDSC、疼痛指數</td><td class="num">3</td></tr>
-              <tr><td>呼吸照護</td><td>FiO2 %.、PaO2</td><td class="num">2</td></tr>
+              <tr><td>神經評估</td><td>昏迷指數、瞳孔大小(右/左)、四肢肌力</td><td class="num">6</td></tr>
+              <tr><td>鎮靜／譫妄／疼痛</td><td>RASS 鎮靜程度評估表、ICDSC、疼痛指數/評估工具</td><td class="num">3</td></tr>
+              <tr><td>評分表（Scoring）</td><td>APACHE Ⅱ、TISS、SOFA、UA/NSTEMI</td><td class="num">4</td></tr>
+              <tr><td>呼吸照護紀錄</td><td>FiO2 %.、PaO2</td><td class="num">2</td></tr>
               <tr><td>呼吸及檢驗紀錄表</td><td>FiO2 %、Ventilator Mode.</td><td class="num">2</td></tr>
-              <tr><td>生命徵象及治療紀錄-Scoring</td><td>APACH II、TISS、SOFA、UA/NSTEMI</td><td class="num">4</td></tr>
               <tr><td>生命徵象</td><td>體溫(˚C)</td><td class="num">1</td></tr>
+              <tr><td>輸出入量（I/O）</td><td>體重-kg (每日)、輸入／排出量合計 (8hr、24hr)、尿液、pigtail、胸腔輸出、糞便輸出</td><td class="num">9</td></tr>
+              <tr><td>CRRT</td><td>TMP (mmHg)、Fluid removed-UF rate (mL/hr)、Fluid removed-weight loss(mL/hr)</td><td class="num">3</td></tr>
+              <tr><td>體外維生系統（ECMO）</td><td>Pump Speed、Blood Flow (L/min)、Gas Flow (L/min)、FiO2、Pulse Index、Pump Power</td><td class="num">6</td></tr>
+              <tr><td>體外心律調節（TPM/TCP）</td><td>TCP rate (ppm)、TCP output (mA)、Sensitivity (mV)</td><td class="num">3</td></tr>
+              <tr><td><b>藥物醫囑</b></td><td>鎮靜、止痛、肌肉鬆弛、升壓藥物（見下方說明）</td><td class="num">11 類</td></tr>
             </tbody>
           </table>
         </div>
         <p><b>體溫請到本表找，不在 <code>dbo.CDSUnvalidatedData</code>。</b>
           它是人工填寫而非儀器上傳，因此走這條管線。</p>
+        <p><b><code>FiO2</code> 有三種寫法。</b>來源表單不同，<code>terseLabel</code>
+          分別是 <code>FiO2 %</code>、<code>FiO2 %.</code>（多一個句點）與 <code>FiO2</code>。
+          用名稱比對時三個都要收。</p>
+      </div>
+
+      <div class="callout warn">
+        <p><b>藥物醫囑跟表單紀錄長得一樣，但來源不同。</b>
+          上表最後一列不是護理師填的表單，而是<b>鎮靜／止痛／肌肉鬆弛／升壓藥物的醫囑紀錄</b>，
+          寫進同一張 <code>dbo.CISData</code>、欄位完全相同。這幾列的 <code>terseLabel</code>
+          是<b>藥品醫囑名稱</b>而不是評估項目名。目前涵蓋 11 類藥品：</p>
+        <p><code>Fentanyl</code>、<code>Precedex</code>、<code>Midazolam</code>、
+          <code>Fresofol</code>、<code>Nimbex</code>、<code>Dopamin</code>、
+          <code>Levophed</code>、<code>Epinephrine</code>（含 Norepinephrine）、
+          <code>Dobutamine</code>、<code>Pitressin</code>、<code>Perdipine</code></p>
       </div>
 
       <div class="block">
@@ -1036,7 +1056,7 @@
                 <td class="field">terseLabel</td>
                 <td class="type">nvarchar(32)</td>
                 <td class="nul y">是</td>
-                <td>項目名稱，例如「昏迷指數」、「RASS」、「體溫」。尚未建檔時為 <code>NULL</code>。</td>
+                <td>項目名稱，例如「昏迷指數」、「RASS」、「體溫」；藥物醫囑的列則是<b>藥品醫囑名稱</b>。尚未建檔時為 <code>NULL</code>。</td>
               </tr>
               <tr>
                 <td class="field">terseForm</td>

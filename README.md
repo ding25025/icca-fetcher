@@ -5,7 +5,7 @@
 | 工具 | 撈什麼 | 資料來源 | 備註 |
 |---|---|---|---|
 | [`vitals.js`](vitals.js) | 生命徵象（HR、SpO2、動脈壓、CVP…） | CDS 的 26 張環狀表 ＋ 非週期表 | 實務上主要用的那支 |
-| [`neuro.js`](neuro.js) | 神經評估、RASS、ICDSC、FiO2、PaO2、體溫 | primary ＋ 各 CISChartingDB 分片 | 每 5 分鐘撈有異動的病歷紀錄 |
+| [`neuro.js`](neuro.js) | 護理師填在表單上的紀錄（神經評估、RASS/ICDSC、Scoring、呼吸參數、體溫、I/O、CRRT/ECMO…），另可一併撈鎮靜與升壓藥物醫囑 | primary ＋ 各 CISChartingDB 分片 | 每 5 分鐘撈有異動的病歷紀錄 |
 | [`ring.js`](ring.js) | 環狀表定位與原始查詢 | CDS | `vitals.js` 的底層，也能單獨用 |
 | [`sink.js`](sink.js) | 把撈到的資料寫進中介資料庫（SQL Server） | — | 設定 `sink` 之後就不落 JSON 檔了 |
 | [`server.js`](server.js) | 把 `ring.js` / `vitals.js` / `neuro.js` 包成常駐 HTTP 服務 | 同上 | 可自己定時撈並寫入，另見 [SERVER.md](SERVER.md) |
@@ -537,7 +537,7 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
 | 「新資料」的定義 | 量測時間（來源的 `measurementTime`，輸出叫 `chartTime`）落在時間窗 | `storeTime` 落在時間窗（有異動才撈） |
 | 預設時間窗 | 5 分鐘 | 6 分鐘（5 分鐘一輪多留 1 分鐘） |
 
-## 三段查詢
+## 四段查詢
 
 1. **primary**：跑 [sql/neuro-interventions.sql](sql/neuro-interventions.sql)，撈出要追蹤的
    `interventionId` + `terseLabel`。等同 `vitals.js` 的 `--discover`。
@@ -545,31 +545,78 @@ node vitals.js --convert my-list.txt -o params.json            # 指定輸出檔
    `ptEncounterId`，以及每個人的病歷資料落在哪個 charting 資料庫（`HostDb` 的
    `dbSqlInstance` / `dbName`），順便帶病歷號與床號。
 3. **各 charting 分片平行查**：依 `(dbSqlInstance, dbName)` 分組，每個 `CISChartingDBxxxx`
-   連一次，查 `dbo.PtIntervention`。某個分片連不上只警告並略過那一組，其餘照常輸出。
+   連一次，查 `dbo.PtIntervention`：`interventionId` 在第 1 段的清單裡、`ptEncounterId`
+   在該組裡、`storeTime` 落在時間窗內。某個分片連不上只警告並略過那一組，其餘照常輸出。
+4. **同一條連線再撈藥物醫囑**：跑 [sql/orders.sql](sql/orders.sql)，沿
+   `StdOrderRequest` → `PtDescriptor` → `PtIntervention` 撈鎮靜、止痛、肌肉鬆弛與
+   升壓藥物的醫囑紀錄，條件一樣是「該組的 `ptEncounterId` ＋ `storeTime` 在時間窗內」。
+   這段**不看**第 1 段的 `interventionId` 清單，改用藥名比對，`terseLabel` 直接取
+   `StdOrderRequest.terseForm`。沒有開關，跟第 3 段一樣每一輪都會撈。
 
 charting 分片的連線沿用 primary 的帳密與 `options`，只換 `server` / `database`，
 不必另外設定。
 
+> 第 3、4 段跑在同一次分片工作裡，但**醫囑失敗不會拖垮第 3 段**。撈不到醫囑
+> （表不存在、沒權限、逾時）時那一組仍然算成功、表單紀錄照常輸出，只會多印一行
+> `⚠ … 藥物醫囑沒撈到：…`，`--with-summary` 的 `summary[].orderError` 也記得住。
+> 看到那行就表示這一輪那個分片的醫囑是空的。
+
 ## 撈哪些項目
 
-[sql/neuro-interventions.sql](sql/neuro-interventions.sql) 目前涵蓋六組，
-用 `UNION` 併起來，每組的差別只有「`terseLabel` 清單 ＋ `FSSection` ＋ `Document`」三個條件：
+兩份 SQL 各管一段：表單紀錄看 `interventionId` 清單，藥物醫囑看藥名。
 
-| 組別 | 項目 |
-|---|---|
-| 1 | 神經評估：昏迷指數、睜眼/語言/運動反應、瞳孔大小與對光反應、眼球活動、四肢肌力（共 11 項） |
-| 2 | RASS 鎮靜程度評估表 |
-| 3 | ICDSC 譫妄評估 |
-| 4 | FiO2 |
-| 5 | PaO2 |
-| 6 | 體溫 |
+### 表單紀錄（[sql/neuro-interventions.sql](sql/neuro-interventions.sql)）
+
+目前 14 個 `SELECT` 區塊用 `UNION` 併起來（編號到 13，其中組別 11 有兩塊），
+共 39 個 `terseLabel`。每組的差別只有「`terseLabel` 清單 ＋ `FSSection` ＋ `Document`」
+三個條件，其餘 join／篩選邏輯完全相同：
+
+| 組別 | 表單（`Document`） | 區段（`FSSection`） | `terseLabel` |
+|---|---|---|---|
+| 1 | 神經學檢查及昏迷評估紀錄 | 神經系統病人生命徵象 | 昏迷指數、瞳孔大小(右/左)、左右上下肢肌力（共 6 項） |
+| 2 | 生命徵象及治療紀錄 | 生命徵象 | RASS 鎮靜程度評估表 |
+| 3 | 生命徵象及治療紀錄 | Scoring | APACHE Ⅱ、TISS、SOFA、UA/NSTEMI |
+| 4 | 加護病房護理評估紀錄 | PAD(不列印) | ICDSC、疼痛指數/評估工具 |
+| 5 | 呼吸及檢驗紀錄表 | 呼吸治療參數 | FiO2 %、Ventilator Mode. |
+| 6 | 呼吸照護紀錄 | 呼吸治療參數 | FiO2 %. |
+| 7 | 呼吸照護紀錄 | 血液氣體分析 | PaO2 |
+| 8 | 生命徵象及治療紀錄 | 生命徵象 | 體溫(˚C) |
+| 9 | 生命徵象及治療紀錄 | Intake & Output | 體重-kg (每日)、輸入/排出量合計 (8hr、24hr)、尿液、pigtail、胸腔輸出、糞便輸出（共 9 項） |
+| 10 | CRRT紀錄 (Prismaflex) | 觀察紀錄 | TMP (mmHg) |
+| 11 | CRRT紀錄 (Prismaflex) | Settings | Fluid removed-UF rate (mL/hr) |
+| 11 | CRRT紀錄 (Infomed) | Setting | Fluid removed-weight loss(mL/hr) |
+| 12 | 體外維生系統及生命徵象紀錄 | （不指定，整張表單都收） | Pump Speed、Blood Flow (L/min)、Gas Flow (L/min)、FiO2、Pulse Index、Pump Power |
+| 13 | 生命徵象及治療紀錄 | TPM/TCP | TCP rate (ppm)、TCP output (mA)、Sensitivity (mV) |
 
 要再加一種，複製一個 `SELECT` 區塊、換掉那三個條件即可。
 `EXISTS` 那段用 `conceptId` 把 intervention 綁回它實際出現的表單區段，
 避免撈到同名但屬於別張表單的項目。
 
+> 組別 12 是唯一不指定 `FSSection` 的：只綁 `Document`，整張表單都收。
+> `fs` → `sl` → `sr` → `ar` 那串 join 還是要留著，`conceptId` 挂在 `FSAllowedRow` 上，
+> 少了它 `EXISTS` 就沒有跟 `i` 相關、整個條件會恆真。
+>
+> 還有一件事：`FiO2` 在組別 5、6、12 分別是 `FiO2 %`、`FiO2 %.`（多一個句點）、
+> `FiO2` 三個不同的 `terseLabel`，下游若用名字比對，三個都要收。
+
 > 體溫本來走 `vitals.js` 的儀器資料，現在改由這裡出，所以
 > [sql/parameter-ids.txt](sql/parameter-ids.txt) 裡的體溫 `parameterId` 已經移除。
+
+### 藥物醫囑（[sql/orders.sql](sql/orders.sql)）
+
+不走 `interventionId` 清單，改拿 `StdOrderRequest.terseForm` 做藥名比對，目前 11 個關鍵字：
+
+`Fentanyl`、`Precedex`、`Midazolam`、`Fresofol`、`Nimbex`、`Dopamin`、`Levophed`、
+`Epinephrine`、`Dobutamine`、`Pitressin`、`Perdipine`
+
+比對是 `LIKE '%…%'`，所以 `Epinephrine` 那條也會一併撈到 Norepinephrine。要加藥就往那串
+`OR` 裡加一行。SQL 裡**必須留著 `/*__ENCOUNTER_IDS__*/` 這個註解**——`neuro.js` 會把它
+換成該組的 `ptEncounterId` 參數。`prepare()` 讀檔時就會檢查，少了會當場擋下來，
+`--dry-run` 也擋得到，不會等到連上分片才一次炸掉所有組。
+
+批次前綴（`READ UNCOMMITTED`、`DEADLOCK_PRIORITY LOW`、`LOCK_TIMEOUT`、`NOCOUNT`）
+由 `neuro.js` 自動補上，跟第 3 段用同一份、`LOCK_TIMEOUT` 取設定的 `lockTimeoutMs`
+（預設 3000 毫秒），所以這份 SQL 裡不用自己寫 `SET`。
 
 ## 執行
 
@@ -602,7 +649,6 @@ node neuro.js --help              # 全部選項
         "terseLabel": "昏迷指數",
         "terseForm": "E4V5M6",
         "storeTime": "2026-07-31 11:24:05",
-        "addTime": "2026-07-31 11:24:00",
         "chartTime": "2026-07-31 11:20:00"
       }
     ]
@@ -617,10 +663,10 @@ node neuro.js --help              # 全部選項
 |---|---|
 | `lifetimeNumber` | 病歷號 |
 | `bed` | 床號 |
-| `terseLabel` | 項目名（昏迷指數、RASS、體溫…），來自第 1 段查詢 |
+| `terseLabel` | 項目名（昏迷指數、RASS、體溫…）。表單紀錄來自第 1 段查詢，藥物醫囑取 `StdOrderRequest.terseForm` |
 | `terseForm` | 實際填的值 |
 | `chartTime` | 臨床上這筆紀錄代表的時間 |
-| `addTime` / `storeTime` | 建立時間 / 寫入時間；`storeTime` 是判斷「有異動」的依據 |
+| `storeTime` | ICCA 端寫入的時間，也是判斷「有異動」的依據 |
 
 ## 設定
 
@@ -631,7 +677,8 @@ node neuro.js --help              # 全部選項
   "neuro": {
     "windowMinutes": 60,
     "output": "neuro_{ts}.json",
-    "encounterChunk": 1000
+    "encounterChunk": 1000,
+    "orderSqlFile": "sql/orders.sql"
   }
 }
 ```
@@ -639,6 +686,9 @@ node neuro.js --help              # 全部選項
 `encounterChunk` 是一次 `IN` 幾個 `ptEncounterId`——整個加護病房的病人一次塞進去會超過
 SQL Server 單次請求 2100 個參數的上限，所以切塊查再合併。注意每一塊都要重帶一次完整的
 `interventionId` 清單，兩者相加才是實際的參數量。
+
+`orderSqlFile` 是第 4 段藥物醫囑的 SQL 路徑，預設 `sql/orders.sql`。**醫囑沒有開關**，
+每一輪都跟表單紀錄一起撈；檔案不見時 `prepare()` 就會擋下來，不會靜靜地少撈一半。
 
 ---
 
