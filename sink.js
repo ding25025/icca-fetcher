@@ -363,6 +363,13 @@ function valuesOf(spec, row, stats) {
     let s = String(raw);
     const lim = maxLen(c.type);
     if (lim && s.length > lim) {
+      // 只記總數的話，看到警告也不知道要去查哪一欄、欄寬該放到多少。
+      // 記欄名與「原本最長幾個字」，訊息就直接是答案。
+      const cols = stats.truncatedCols || (stats.truncatedCols = {});
+      const t = cols[c.name] || { n: 0, max: 0 };
+      t.n++;
+      if (s.length > t.max) t.max = s.length;
+      cols[c.name] = t;
       s = s.slice(0, lim);
       stats.truncated++;
     }
@@ -485,7 +492,7 @@ async function writeRows(kind, rows, settings) {
   assertConfigured(settings);
 
   const started = Date.now();
-  const stats = { total: rows.length, written: 0, skipped: 0, truncated: 0 };
+  const stats = { total: rows.length, written: 0, skipped: 0, truncated: 0, truncatedCols: {} };
 
   // 鑰匙裡的時間欄位沒值、或 required 欄位（病歷號）沒值的列先挑掉。
   // required 只認 null / undefined / 空字串——propName 的空字串是有意義的值，不在此列。
@@ -617,7 +624,12 @@ function describe(stats) {
   const dup = stats.total - stats.skipped - stats.written;
   if (dup > 0) bits.push(`重複略過 ${dup}`);
   if (stats.skipped) bits.push(`⚠ 缺鑰匙欄位或病歷號略過 ${stats.skipped}`);
-  if (stats.truncated) bits.push(`⚠ 過長截斷 ${stats.truncated}`);
+  if (stats.truncated) {
+    const where = Object.entries(stats.truncatedCols || {})
+      .map(([name, t]) => `${name} ${t.n} 筆、最長 ${t.max} 字`)
+      .join('；');
+    bits.push(`⚠ 過長截斷 ${stats.truncated}${where ? `（${where}）` : ''}`);
+  }
   return bits.join('，') + `（共 ${stats.total} 筆，${(stats.ms / 1000).toFixed(1)}s）`;
 }
 
