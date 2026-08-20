@@ -14,7 +14,12 @@
  *   3. 依 (dbSqlInstance, dbName) 分組，每個 CISChartingDBxxxx 連一次，查
  *      dbo.PtIntervention：interventionId 在清單內、ptEncounterId 在該組內、
  *      且 storeTime 落在時間窗內（有異動）。
- *   4. 合併 → 併 terseLabel → 時間換算 +8 → 依病人收成一筆（病歷號 + 床號 + records[]）
+ *   4. 同一條連線再跑 sql/orders.sql，撈鎮靜／止痛／肌肉鬆弛／升壓藥物的醫囑紀錄
+ *      （StdOrderRequest → PtDescriptor → PtIntervention）。這段不看第 1 段的
+ *      interventionId 清單，改用藥名比對，terseLabel 取 StdOrderRequest.terseForm。
+ *      沒有開關，跟第 3 段一樣一定會撈。醫囑失敗不會拖垮第 3 段：那一組仍然算
+ *      成功、病歷紀錄照常輸出，只多印一行警告並記進 summary 的 orderError。
+ *   5. 合併 → 併 terseLabel → 時間換算 +8 → 依病人收成一筆（病歷號 + 床號 + records[]）
  *      → 輸出單一 JSON 陣列 neuro_{ts}.json（依床號排序）。設定檔有 "sink" 區塊時
  *      改成直接寫進中介資料庫（一筆紀錄一列），不落檔——見 sink.js。
  *
@@ -114,6 +119,8 @@ const DEFAULTS = {
   displayTimezoneOffsetHours: 8,
   interventionSqlFile: 'sql/neuro-interventions.sql',
   encountersSqlFile: 'sql/neuro-encounters.sql',
+  // 藥物醫囑（鎮靜／止痛／肌肉鬆弛／升壓）。沒有開關，每一輪都跟表單紀錄一起撈。
+  orderSqlFile: 'sql/orders.sql',
   // primary 連哪個資料庫：沒指定、SQL 也沒寫 USE 時，最後試這些常見名稱。
   patientDatabaseFallbacks: ['CISPrimaryDB'],
   // 病歷紀錄表（照 HostDb 分片，各 charting DB 都有這張）
@@ -244,15 +251,23 @@ function indexEncounters(rows) {
 }
 
 // ---------- 從某個 charting 分片撈 PtIntervention ----------
+/**
+ * 兩段 charting 查詢共用的批次前綴：唯讀、死結時先讓別人、鎖等待上限照設定走。
+ * 撈的是正式機的病歷表，寧可自己逾時退開也不要卡住臨床端。
+ */
+function batchPrelude(cfg) {
+  return `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET DEADLOCK_PRIORITY LOW;
+SET LOCK_TIMEOUT ${Number((cfg || {}).lockTimeoutMs) || 3000};
+SET NOCOUNT ON;`;
+}
+
 function buildNeuroQuery(interventionIds, encounterIds, cfg) {
   const table = safeIdent(cfg.table || 'PtIntervention', 'table');
   const iParams = interventionIds.map((_, i) => `@i${i}`).join(', ');
   const eParams = encounterIds.map((_, i) => `@e${i}`).join(', ');
   return `
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SET DEADLOCK_PRIORITY LOW;
-SET LOCK_TIMEOUT ${Number(cfg.lockTimeoutMs) || 3000};
-SET NOCOUNT ON;
+${batchPrelude(cfg)}
 
 SELECT
      ptEncounterId
@@ -260,7 +275,6 @@ SELECT
     ,terseForm
     ,verboseForm
     ,storeTime
-    ,addTime
     ,chartTime
     ,isDeleted
 FROM dbo.[${table}] WITH (NOLOCK)
@@ -290,7 +304,7 @@ async function fetchNeuro(pool, { interventionIds, encounterIds, windowMinutes, 
 }
 
 // ---------- 時間換算 ----------
-const TIME_FIELDS = ['storeTime', 'addTime', 'chartTime'];
+const TIME_FIELDS = ['storeTime', 'chartTime'];
 
 /** ICCA 存 UTC，就地加時差並格式化成 "2026-07-27 11:24:00"。要保留 UTC 就 --utc。 */
 function shiftTimes(row, offsetHours) {
@@ -298,6 +312,44 @@ function shiftTimes(row, offsetHours) {
   for (const f of TIME_FIELDS) {
     if (out[f] == null) continue;
     out[f] = ring.fmtDb(new Date(new Date(out[f]).getTime() + offsetHours * 3600e3));
+  }
+  return out;
+}
+
+// ---------- 從同一個 charting 分片撈藥物醫囑 ----------
+/**
+ * sql/orders.sql 裡的這個標記會被換成該組的 ptEncounterId 參數（@oe0, @oe1, …）。
+ * 標記在 prepare() 讀檔時就檢查，不是等到連上分片才發現——不然一個字打錯，
+ * 所有分片會在同一秒一起炸。
+ */
+const ENCOUNTER_IDS_MARKER = '/*__ENCOUNTER_IDS__*/';
+
+function assertOrderSql(orderSql, where) {
+  if (!String(orderSql).includes(ENCOUNTER_IDS_MARKER)) {
+    throw new Error(
+      `${where} 裡找不到 ${ENCOUNTER_IDS_MARKER}：` +
+        `neuro.js 要靠這個標記把該組的 ptEncounterId 塞進 IN (...)`
+    );
+  }
+}
+
+function buildOrderQuery(orderSql, encounterIds, cfg) {
+  assertOrderSql(orderSql, 'order SQL');
+  const params = encounterIds.map((_, i) => `@oe${i}`).join(', ');
+  // split/join 而不是 replace：replace 只換第一個，標記寫了兩次會留下沒展開的那個
+  const body = V.stripBatchDirectives(orderSql).split(ENCOUNTER_IDS_MARKER).join(params);
+  return `${batchPrelude(cfg)}\n\n${body}`;
+}
+
+async function fetchOrders(pool, { orderSql, encounterIds, windowMinutes, settings }) {
+  const chunk = Number(settings.encounterChunk) || 1000;
+  const out = [];
+  for (let off = 0; off < encounterIds.length; off += chunk) {
+    const enc = encounterIds.slice(off, off + chunk);
+    const req = pool.request().input('win', sql.Int, windowMinutes);
+    enc.forEach((v, i) => req.input(`oe${i}`, sql.UniqueIdentifier, v));
+    const r = await req.query(buildOrderQuery(orderSql, enc, settings));
+    out.push(...(r.recordset || []));
   }
   return out;
 }
@@ -330,13 +382,21 @@ async function runPrimary(primary, candidates, { intSql, encSql, wantInterventio
 }
 
 // ---------- 單一 charting 分片 ----------
-async function runGroup(group, { interventionIds, windowMinutes, template, settings, timeout }) {
+async function runGroup(group, { interventionIds, orderSql, windowMinutes, template, settings, timeout }) {
   const { dbSqlInstance, dbName, encounterIds } = group;
   const conn = buildChartingConn(template, dbSqlInstance, dbName);
   const pool = await connect(conn, timeout);
   try {
     const rows = await fetchNeuro(pool, { interventionIds, encounterIds, windowMinutes, settings });
-    return { dbSqlInstance, dbName, encounters: encounterIds.length, count: rows.length, rows };
+    // 醫囑撈失敗不能把整組拖下水：上面那批表單紀錄已經在手上了，跟著丟掉等於
+    // 這個分片這一輪什麼都沒寫。錯誤往上帶，由 collect 印出來、記進 summary。
+    let orderError = null;
+    try {
+      rows.push(...(await fetchOrders(pool, { orderSql, encounterIds, windowMinutes, settings })));
+    } catch (e) {
+      orderError = e && e.message ? e.message : String(e);
+    }
+    return { dbSqlInstance, dbName, encounters: encounterIds.length, count: rows.length, rows, orderError };
   } finally {
     await release(pool);
   }
@@ -368,6 +428,7 @@ function prepare(args) {
   // SQL 檔
   const intAbs = path.resolve(process.cwd(), settings.interventionSqlFile);
   const encAbs = path.resolve(process.cwd(), settings.encountersSqlFile);
+  const orderAbs = path.resolve(process.cwd(), settings.orderSqlFile);
   if (!fs.existsSync(encAbs)) throw new Error(`找不到在床病人 SQL：${encAbs}`);
   const encSql = fs.readFileSync(encAbs, 'utf8');
 
@@ -379,11 +440,14 @@ function prepare(args) {
     throw new Error(`找不到 interventionId SQL：${intAbs}（或用 --ids-file 指定清單）`);
   }
   const intSql = args.idsFile ? '' : fs.readFileSync(intAbs, 'utf8');
+  if (!fs.existsSync(orderAbs)) throw new Error(`找不到藥物醫囑 SQL：${orderAbs}`);
+  const orderSql = fs.readFileSync(orderAbs, 'utf8');
+  assertOrderSql(orderSql, orderAbs);
 
   // primary 連哪個資料庫：沿用 vitals 的候選邏輯（USE > 設定 > primary.database > fallback）
   const candidates = V.patientDatabaseCandidates(encSql, primary, {}, settings, args.primaryDb);
 
-  return { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, idsFromFile, candidates };
+  return { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, orderSql, idsFromFile, candidates };
 }
 
 /**
@@ -394,7 +458,7 @@ function prepare(args) {
 async function collect(opts = {}, prep = null) {
   const args = { config: 'databases.config.json', ...opts };
   const p = prep || prepare(args);
-  const { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, candidates } = p;
+  const { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, orderSql, candidates } = p;
 
   // 1+2. primary：interventionId 清單 + 在床病人 + HostDb 分組
   console.log(`連 primary（${primaryRef}）查 interventionId 與在床病人...`);
@@ -433,7 +497,7 @@ async function collect(opts = {}, prep = null) {
   // 3. 各 charting 分片平行撈（沿用 primary 帳密，只換 server/database）
   const settled = await Promise.allSettled(
     groups.map((g) =>
-      runGroup(g, { interventionIds, windowMinutes, template: primary, settings, timeout })
+      runGroup(g, { interventionIds, orderSql, windowMinutes, template: primary, settings, timeout })
     )
   );
 
@@ -449,7 +513,7 @@ async function collect(opts = {}, prep = null) {
   settled.forEach((s, i) => {
     const g = groups[i];
     if (s.status === 'fulfilled') {
-      const { rows, count, encounters } = s.value;
+      const { rows, count, encounters, orderError } = s.value;
       total += rows.length;
       for (const r of rows) {
         const encKey = upper(r.ptEncounterId);
@@ -469,11 +533,10 @@ async function collect(opts = {}, prep = null) {
         }
         const rec = {
           interventionId: r.interventionId,
-          terseLabel: labelOf(r.interventionId),
+          terseLabel: r.terseLabel != null ? String(r.terseLabel).trim() : labelOf(r.interventionId),
           terseForm: r.terseForm,
           verboseForm: r.verboseForm,
           storeTime: r.storeTime,
-          addTime: r.addTime,
           chartTime: r.chartTime,
           // 作廢註記：ICCA 那筆被刪除／作廢時是 1。**不在這裡過濾掉**——
           // 下游要看得到「這筆沒了」這個變化，過濾是呈現時才做的事（規格 §4）。
@@ -481,8 +544,10 @@ async function collect(opts = {}, prep = null) {
         };
         p.records.push(useUtc ? rec : shiftTimes(rec, offset));
       }
-      summary.push({ db: g.dbName, instance: g.dbSqlInstance, ok: true, encounters, count });
+      summary.push({ db: g.dbName, instance: g.dbSqlInstance, ok: true, encounters, count, orderError });
       console.log(`  ✓ ${g.dbName}：${count} 筆（${encounters} 位病人）`);
+      // 分片本身算成功（表單紀錄有撈到），但這一輪的醫囑是空的，要看得見
+      if (orderError) console.warn(`    ⚠ ${g.dbName} 藥物醫囑沒撈到：${orderError}`);
     } else {
       failures++;
       const msg = s.reason && s.reason.message ? s.reason.message : String(s.reason);
@@ -520,6 +585,7 @@ async function main() {
     console.log(`interventionId 來源：${args.idsFile ? args.idsFile + `（${p.idsFromFile.ids.length} 個）` : p.settings.interventionSqlFile + '（連線時跑 Query 1）'}`);
     console.log(`在床病人 SQL：${p.settings.encountersSqlFile}`);
     console.log(`病歷紀錄表：dbo.${p.settings.table}（依 HostDb 分片，連線時才知道有幾個）`);
+    console.log(`藥物醫囑 SQL：${p.settings.orderSqlFile}（每輪必撈，跟病歷紀錄同一條連線）`);
     console.log(`時間窗：storeTime 近 ${p.windowMinutes} 分鐘（用 DB 端 GETUTCDATE()）`);
     if (toDb) {
       console.log(`寫入資料庫：${sink.describeTarget(sinkSettings)}`);
@@ -577,6 +643,9 @@ module.exports = {
   buildChartingConn,
   buildNeuroQuery,
   fetchNeuro,
+  batchPrelude,
+  buildOrderQuery,
+  fetchOrders,
   shiftTimes,
   mergeSettings,
   DEFAULTS,
