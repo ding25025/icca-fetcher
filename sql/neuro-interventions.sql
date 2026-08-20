@@ -1,28 +1,44 @@
 /*
- * 神經評估、鎮靜/譫妄評估、呼吸與體溫對應的 interventionId + terseLabel
- * （primary / CISPrimaryDB）。
+ * 護理師填在表單上的紀錄對應的 interventionId + terseLabel（primary / CISPrimaryDB）。
+ * 名字叫 neuro，實際範圍早就不只神經評估：鎮靜/譫妄、Scoring、呼吸參數、體溫、
+ * Intake & Output、CRRT、ECMO、TPM/TCP 都在這裡。
  *
  * 供 neuro.js 使用：interventionId 當 PtIntervention 的過濾條件，terseLabel 會原名
- * 併進輸出的每一筆，下游靠它區分是哪一種評估。等同 vitals.js 的 --discover。
+ * 併進輸出的每一筆，下游靠它區分是哪一種紀錄。等同 vitals.js 的 --discover。
  *
- * 目前涵蓋六組，每組的差別只在「terseLabel 清單 + FSSection + Document」三者，
- * 其餘 join／篩選邏輯完全相同，所以用 UNION 併起來。要再加一種，照樣複製一個
- * SELECT 區塊、換掉這三個條件即可：
+ * 目前 14 個 SELECT 區塊（編號到 13，組別 11 有兩塊），共 39 個 terseLabel。
+ * 每組的差別只在「terseLabel 清單 + FSSection + Document」三者，其餘 join／篩選
+ * 邏輯完全相同，所以用 UNION 併起來。要再加一種，照樣複製一個 SELECT 區塊、
+ * 換掉這三個條件即可：
  *
- *   組別  terseLabel                    FSSection.displayLabel  Document.displayLabel
- *   ----  ----------------------------  ----------------------  ------------------------------------
- *   1     昏迷指數/瞳孔/肌力… 共 11 項   神經系統病人生命徵象     神經學檢查及昏迷評估紀錄(、小於兩歲)
- *   2     RASS 鎮靜程度評估表            生命徵象                生命徵象及治療紀錄
- *   3     ICDSC                         PAD(不列印)             加護病房護理評估紀錄
- *   4     FiO2 %.                       呼吸治療參數             呼吸照護紀錄
- *   5     PaO2                          血液氣體分析             呼吸照護紀錄
- *   6     體溫(˚C)                      生命徵象                生命徵象及治療紀錄
+ *   組別  terseLabel                             FSSection.displayLabel  Document.displayLabel
+ *   ----  -------------------------------------  ----------------------  ---------------------------
+ *   1     昏迷指數/瞳孔/四肢肌力 共 6 項          神經系統病人生命徵象     神經學檢查及昏迷評估紀錄
+ *   2     RASS 鎮靜程度評估表                     生命徵象                生命徵象及治療紀錄
+ *   3     APACHE Ⅱ/TISS/SOFA/UA/NSTEMI           Scoring                 生命徵象及治療紀錄
+ *   4     ICDSC、疼痛指數/評估工具                PAD(不列印)             加護病房護理評估紀錄
+ *   5     FiO2 %、Ventilator Mode.               呼吸治療參數             呼吸及檢驗紀錄表
+ *   6     FiO2 %.                                呼吸治療參數             呼吸照護紀錄
+ *   7     PaO2                                   血液氣體分析             呼吸照護紀錄
+ *   8     體溫(˚C)                               生命徵象                生命徵象及治療紀錄
+ *   9     體重、輸入/排出量合計、尿液… 共 9 項     Intake & Output         生命徵象及治療紀錄
+ *   10    TMP (mmHg)                             觀察紀錄                CRRT紀錄 (Prismaflex)
+ *   11    Fluid removed-UF rate (mL/hr)          Settings                CRRT紀錄 (Prismaflex)
+ *   11    Fluid removed-weight loss(mL/hr)       Setting                 CRRT紀錄 (Infomed)
+ *   12    Pump Speed/Blood Flow/FiO2… 共 6 項     （不指定區段）           體外維生系統及生命徵象紀錄
+ *   13    TCP rate/TCP output/Sensitivity        TPM/TCP                 生命徵象及治療紀錄
  *
- * 組別 4~6 是後來加的，不是神經評估：體溫原本走 vitals.js 的 parameter-ids.txt
+ * 組別 5~13 不是神經評估，是後來陸續加的。體溫原本走 vitals.js 的 parameter-ids.txt
  * （儀器資料），改由這裡的圖表資料出，所以那份清單裡的體溫 parameterId 已移除。
  *
  * EXISTS 那段用 conceptId 把 intervention 綁回它實際出現的表單區段，避免撈到同名但
  * 屬於別張表單的 intervention。
+ *
+ * 組別 12 只綁到 Document，不篩 fs.displayLabel（整張表單都收）；
+ *   fs → sl → sr → ar 那串 join 仍然要留著，conceptId 挂在 FSAllowedRow 上。
+ *
+ * ⚠ FiO2 有三個不同的 terseLabel：FiO2 %（組 5）、FiO2 %.（組 6，多一個句點）、
+ *   FiO2（組 12）。下游若用名字比對，三個都要收。
  *
  * 回傳欄位必須包含 interventionId 與 terseLabel（neuro.js 讀這兩欄）。
  * 要連哪個資料庫：可在開頭寫一行 USE <資料庫>，neuro.js 會讀它決定連線目標
@@ -39,7 +55,6 @@ SET NOCOUNT ON;
 SELECT DISTINCT
      i.interventionId
     ,i.terseLabel
-    
 FROM dbo.Intervention i WITH (NOLOCK)
 JOIN dbo.InterventionItem WITH (NOLOCK)
        ON i.interventionId = InterventionItem.interventionId
@@ -302,11 +317,10 @@ WHERE
   )
 
 UNION
--- 組別 10：儀器 Dialysis/ECMO 
+-- 組別 10：CRRT紀錄 (Prismaflex)
 SELECT DISTINCT
      i.interventionId
-    ,i.terseLabel 
-    
+    ,i.terseLabel
 
 FROM dbo.Intervention i WITH (NOLOCK)
 JOIN dbo.InterventionItem WITH (NOLOCK)
@@ -332,61 +346,97 @@ WHERE
         AND ar.conceptId   = i.conceptId
   )
 
---UNION
+UNION
 
--- 組別 11：CRRT紀錄 (Infomed)
+ --組別 11：CRRT紀錄 (Prismaflex) Fluid removed-UF rate (mL/hr)
 
---SELECT DISTINCT
---     i.interventionId
---    ,i.terseLabel 
---    ,i.displayLabel
---    --,i.conceptId
---    --,InterventionItem.displayLabel
---FROM dbo.Intervention i WITH (NOLOCK)
---JOIN dbo.InterventionItem WITH (NOLOCK)
---       ON i.interventionId = InterventionItem.interventionId
---      AND InterventionItem.isPrimary = 1
+SELECT DISTINCT
+     i.interventionId
+    ,i.terseLabel 
+  
+FROM dbo.Intervention i WITH (NOLOCK)
+JOIN dbo.InterventionItem WITH (NOLOCK)
+       ON i.interventionId = InterventionItem.interventionId
+      AND InterventionItem.isPrimary = 1
 
---WHERE
---      i.isPrimary = 1
---      AND i.terseLabel IN (N'TMP (mmHg)')
---  AND EXISTS (
---      SELECT 1
---      FROM dbo.Document      d  WITH (NOLOCK)
---      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
---                                             AND fs.displayLabel    = N'觀察紀錄'
---                                             AND fs.isPrimary       = 1
---      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
---                                             AND sl.isPrimary       = 1
---      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
---                                             AND sr.isPrimary       = 1
---      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
---                                             AND ar.isPrimary       = 1
---      WHERE d.displayLabel IN (N'CRRT紀錄 (Infomed)')
---        AND ar.conceptId   = i.conceptId
---  )
+WHERE
+      i.isPrimary = 1
+      AND i.terseLabel IN (N'Fluid removed-UF rate (mL/hr)')
+  AND EXISTS (
+      SELECT 1
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.displayLabel    = N'Settings'
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel IN (N'CRRT紀錄 (Prismaflex)')
+        AND ar.conceptId   = i.conceptId
+  )
+ 
+UNION  
+ --組別 11：CRRT紀錄 (Infomed) Fluid removed-weight loss (mL/hr)
+SELECT DISTINCT
+     i.interventionId
+    ,i.terseLabel 
+  
+FROM dbo.Intervention i WITH (NOLOCK)
+JOIN dbo.InterventionItem WITH (NOLOCK)
+       ON i.interventionId = InterventionItem.interventionId
+      AND InterventionItem.isPrimary = 1
 
+WHERE
+      i.isPrimary = 1
+      AND i.terseLabel IN (N'Fluid removed-weight loss(mL/hr)')
+  AND EXISTS (
+      SELECT 1
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.displayLabel    = N'Setting'
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel IN (N'CRRT紀錄 (Infomed)')
+        AND ar.conceptId   = i.conceptId
+  )
   UNION
 
--- 組別 12：體外維生系統及生命徵象紀錄
+-- 組別 12：體外維生系統及生命徵象紀錄（這組不指定 FSSection，整張表單都收）
 SELECT DISTINCT
      i.interventionId
     ,i.terseLabel
-    
-    
 FROM dbo.Intervention i WITH (NOLOCK)
+JOIN dbo.InterventionItem WITH (NOLOCK)
+       ON i.interventionId = InterventionItem.interventionId
+      AND InterventionItem.isPrimary = 1
 WHERE
       i.isPrimary = 1
-      AND i.terseLabel IN (N'Pump Speed',N'Blood Flow (L/min)',N'Gas Flow (L/min)',N'FiO2',N'Pulse Index',N'Pump Power')
-     
+  AND i.terseLabel IN (N'Pump Speed',N'Blood Flow (L/min)',N'Gas Flow (L/min)',N'FiO2',N'Pulse Index',N'Pump Power')
   AND EXISTS (
       SELECT 1
-      FROM dbo.Document      d  WITH (NOLOCK)                   
-      WHERE d.displayLabel IN (N'體外維生系統及生命徵象紀錄')  
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel IN (N'體外維生系統及生命徵象紀錄')
+        AND ar.conceptId   = i.conceptId
   )
 
   UNION
-  -- 組別 13：TPM/TCP
+-- 組別 13：生命徵象及治療紀錄 TPM/TCP
 SELECT DISTINCT
      i.interventionId
     ,i.terseLabel
