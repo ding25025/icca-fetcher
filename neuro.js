@@ -236,7 +236,7 @@ function indexEncounters(rows) {
     const dbSqlInstance = r.dbSqlInstance != null ? String(r.dbSqlInstance).trim() : '';
     const dbName = r.dbName != null ? String(r.dbName).trim() : '';
     if (!dbName) continue; // 沒有 HostDb 就無從連線，略過（理論上不會發生）
-    const gk = `${dbSqlInstance} ${dbName}`;
+    const gk = `${dbSqlInstance}\u0000${dbName}`;
     let g = groups.get(gk);
     if (!g) {
       g = { dbSqlInstance, dbName, encounterIds: [], seen: new Set() };
@@ -451,6 +451,14 @@ function prepare(args) {
 }
 
 /**
+ * 逐來源寫入中介資料庫時的來源鑰匙（"SQL instance\\database"）。
+ * server.js 用同一支組鍵，byCharting 的鍵與水位線的鍵才不會有一天對不上。
+ */
+function sourceKey(dbSqlInstance, dbName) {
+  return `${dbSqlInstance}\\${dbName}`;
+}
+
+/**
  * 撈一輪並回傳結果。不讀命令列、不寫檔，所以 server.js 可以直接呼叫。
  * 回傳 { settings, offset, summary, rows, total, groups, failures }，
  * rows 是一位病人一筆（{ lifetimeNumber, bed, records: [...] }），依床號自然排序。
@@ -506,44 +514,60 @@ async function collect(opts = {}, prep = null) {
   const useUtc = args.utc || settings.timesInUtc;
   // 同一個病人（ptEncounterId）的紀錄收在一起：{ lifetimeNumber, bed, records:[] }
   const byPatient = new Map();
+  const byCharting = {};
   const summary = [];
   let failures = 0;
   let total = 0;
+
+  // 同一段轉換同時用於全域輸出與單一 Charting DB 的 sink 寫入；_encounterId
+  // 必須保留成不可列舉屬性，sink.js 才能以住院識別碼穩定去重。
+  function addRows(target, rows) {
+    for (const r of rows) {
+      const encKey = upper(r.ptEncounterId);
+      const pt = patients.get(encKey) || {};
+      let p = target.get(encKey);
+      if (!p) {
+        p = {
+          lifetimeNumber: pt.lifetimeNumber != null ? pt.lifetimeNumber : null,
+          bed: pt.bed != null ? pt.bed : null,
+          records: [],
+        };
+        Object.defineProperty(p, '_encounterId', { value: encKey, enumerable: false });
+        target.set(encKey, p);
+      }
+      const rec = {
+        interventionId: r.interventionId,
+        terseLabel: r.terseLabel != null ? String(r.terseLabel).trim() : labelOf(r.interventionId),
+        terseForm: r.terseForm,
+        verboseForm: r.verboseForm,
+        storeTime: r.storeTime,
+        chartTime: r.chartTime,
+        isDeleted: r.isDeleted ? 1 : 0,
+      };
+      p.records.push(useUtc ? rec : shiftTimes(rec, offset));
+    }
+  }
+
+  // 同一個 ptEncounterId 只會落在一個 Charting DB，真的撞到就把紀錄接起來，
+  // 不要讓後來的那一份蓋掉前面的。病人物件兩邊共用，之後都只讀不改。
+  function mergeInto(target, source) {
+    for (const [key, p] of source) {
+      const existing = target.get(key);
+      if (existing) existing.records.push(...p.records);
+      else target.set(key, p);
+    }
+  }
 
   settled.forEach((s, i) => {
     const g = groups[i];
     if (s.status === 'fulfilled') {
       const { rows, count, encounters, orderError } = s.value;
       total += rows.length;
-      for (const r of rows) {
-        const encKey = upper(r.ptEncounterId);
-        const pt = patients.get(encKey) || {};
-        let p = byPatient.get(encKey);
-        if (!p) {
-          p = {
-            lifetimeNumber: pt.lifetimeNumber != null ? pt.lifetimeNumber : null, // 病歷號
-            bed: pt.bed != null ? pt.bed : null,
-            records: [],
-          };
-          // 寫進 sink 時要一個穩定的病人鑰匙：病歷號可能沒填、床號會因轉床而變，
-          // 只有 ptEncounterId 從頭到尾不動。掛成不可列舉的屬性，JSON.stringify
-          // 看不到它，輸出格式跟以前一模一樣。
-          Object.defineProperty(p, '_encounterId', { value: encKey, enumerable: false });
-          byPatient.set(encKey, p);
-        }
-        const rec = {
-          interventionId: r.interventionId,
-          terseLabel: r.terseLabel != null ? String(r.terseLabel).trim() : labelOf(r.interventionId),
-          terseForm: r.terseForm,
-          verboseForm: r.verboseForm,
-          storeTime: r.storeTime,
-          chartTime: r.chartTime,
-          // 作廢註記：ICCA 那筆被刪除／作廢時是 1。**不在這裡過濾掉**——
-          // 下游要看得到「這筆沒了」這個變化，過濾是呈現時才做的事（規格 §4）。
-          isDeleted: r.isDeleted ? 1 : 0,
-        };
-        p.records.push(useUtc ? rec : shiftTimes(rec, offset));
-      }
+      const sourcePatients = new Map();
+      addRows(sourcePatients, rows);
+      mergeInto(byPatient, sourcePatients);
+      byCharting[sourceKey(g.dbSqlInstance, g.dbName)] =
+        [...sourcePatients.values()].sort((a, b) => V.compareBeds(a.bed, b.bed));
       summary.push({ db: g.dbName, instance: g.dbSqlInstance, ok: true, encounters, count, orderError });
       console.log(`  ✓ ${g.dbName}：${count} 筆（${encounters} 位病人）`);
       // 分片本身算成功（表單紀錄有撈到），但這一輪的醫囑是空的，要看得見
@@ -560,7 +584,7 @@ async function collect(opts = {}, prep = null) {
   // 用 vitals.js 那支自然排序，ICU-10 才不會排到 ICU-2 前面，兩支輸出順序也一致。
   const merged = [...byPatient.values()].sort((a, b) => V.compareBeds(a.bed, b.bed));
 
-  return { settings, offset, summary, rows: merged, total, groups: groups.length, failures, primaryDatabase: pr.database };
+  return { settings, offset, summary, rows: merged, byCharting, total, groups: groups.length, failures, primaryDatabase: pr.database };
 }
 
 // ---------- 主流程 ----------
@@ -609,8 +633,13 @@ async function main() {
   if (toDb && !(res.groups && res.failures === res.groups)) {
     const stats = await sink.writeNeuro(res.rows, sinkSettings);
     console.log(`已寫入 ${sink.describe(stats)}`);
-    // 記下「最後一次成功寫入」，之後要補撈才知道從幾點開始（見 state.js）
-    state.recordSuccess('neuro', { startedAtMs: started, stats });
+    // 記下「最後一次成功寫入」，之後要補撈才知道從幾點開始（見 state.js）。
+    // 整批一次寫進去，成功的 charting 分片水位一起前進；失敗的分片不動。
+    for (const s of res.summary) {
+      const key = sourceKey(s.instance, s.db);
+      if (s.ok) state.recordSourceSuccess('neuro', key, { startedAtMs: started, stats: { table: stats.table } });
+      else state.recordSourceFailure('neuro', key, s.error);
+    }
   }
 
   if (wantFile) {
@@ -636,6 +665,7 @@ if (require.main === module) {
 module.exports = {
   __main: main,
   collect, // server.js 用：撈一輪回傳結果，不寫檔
+  sourceKey, // server.js 用：byCharting 的鍵＝水位線的鍵
   prepare,
   indexInterventions,
   loadIdsFile,

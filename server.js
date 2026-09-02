@@ -87,6 +87,21 @@ const SRV = CFG.server || {};
 const TOKEN = process.env.ICCA_TOKEN || SRV.token || null;
 const SINK = sink.mergeSettings(CFG);
 const SINK_ON = sink.wanted(SINK);
+
+// HTTP 是對外邊界，不能讓一個過大的 query string 把來源 SQL Server 或 Node 記憶體拖垮。
+// 補資料仍允許到 state.js 的 24 小時上限；一般讀取生命徵象則刻意縮短為 60 分鐘。
+function positiveSetting(value, fallback, hardMax) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return fallback;
+  return Math.min(n, hardMax);
+}
+const API_LIMITS = {
+  vitalsWindowMinutes: positiveSetting(SRV.maxVitalsWindowMinutes, 60, state.MAX_BACKFILL_HOURS * 60),
+  neuroWindowMinutes: positiveSetting(SRV.maxNeuroWindowMinutes, 1440, state.MAX_BACKFILL_HOURS * 60),
+  pushWindowMinutes: positiveSetting(SRV.maxPushWindowMinutes, state.MAX_BACKFILL_HOURS * 60, state.MAX_BACKFILL_HOURS * 60),
+  latestRows: positiveSetting(SRV.maxLatestRows, 1000, 5000),
+  atRows: positiveSetting(SRV.maxAtRows, 1000, 5000),
+};
 // 啟用了就在啟動時檢查連線設定齊不齊。服務現在的本業就是寫進中介資料庫，
 // 設錯了不該讓它裝作健康——寧可起不來，也不要每 5 分鐘失敗一次而沒人看見。
 if (SINK_ON) sink.assertConfigured(SINK);
@@ -226,7 +241,7 @@ async function epOrder(ctx, q) {
 
 async function epLatest(ctx, q) {
   const s = await runScan(ctx, q);
-  const latestN = numOrNull(q.n) || CFG.latestN || 100;
+  const latestN = boundedInt(q.n, 'n', API_LIMITS.latestRows) || boundedConfiguredInt(CFG.latestN, 'latestN', API_LIMITS.latestRows, 100);
   const filter = buildFilter(ctx, q, s.offsetHours);
   let rows = await ring.fetchLatest(ctx.pool, s.orderedNewToOld, s.r, latestN, filter);
   if (s.direction === 'oldToNew') rows = rows.reverse();
@@ -269,7 +284,7 @@ async function epAt(ctx, q) {
   };
 
   if (truthy(q.fetch) && loc.status === 'ok') {
-    const latestN = numOrNull(q.n) || CFG.latestN || 100;
+    const latestN = boundedInt(q.n, 'n', API_LIMITS.atRows) || boundedConfiguredInt(CFG.latestN, 'latestN', API_LIMITS.atRows, 100);
     const filter = buildFilter(ctx, q, s.offsetHours);
     out.rows = await ring.fetchAround(ctx.pool, loc.table, r, latestN, filter, axis, targetMs);
   }
@@ -294,10 +309,11 @@ function serialize(key, fn) {
 //   utc 不換算時區、noPatients 不查病歷號、keepUnmatched 保留沒對到病人的床、
 //   allRows 不降頻、noAperiodic 不撈 NBP、withSummary 包成 { summary, rows }
 async function epVitals(_ctx, q) {
+  const window = boundedInt(q.window != null ? q.window : q.w, 'window', API_LIMITS.vitalsWindowMinutes);
   const res = await serialize('vitals', () =>
     vitals.collect({
       config: CONFIG_PATH,
-      window: numOrNull(q.window != null ? q.window : q.w),
+      window,
       site: q.site || null,
       param: q.param != null ? q.param : null,
       discover: truthy(q.discover),
@@ -321,10 +337,11 @@ async function epVitals(_ctx, q) {
 // 查詢參數對應 neuro.js 的命令列旗標：
 //   window(w) 時間窗分鐘（不給就用 neuro.js 的預設 6）、utc 不換算時區、withSummary 包成 { summary, rows }
 async function epNeuro(_ctx, q) {
+  const window = boundedInt(q.window != null ? q.window : q.w, 'window', API_LIMITS.neuroWindowMinutes);
   const res = await serialize('neuro', () =>
     neuro.collect({
       config: CONFIG_PATH,
-      window: numOrNull(q.window != null ? q.window : q.w),
+      window,
       utc: truthy(q.utc),
       primaryDb: q.primaryDb || null,
     })
@@ -342,12 +359,74 @@ async function epNeuro(_ctx, q) {
 
 /** 時間窗預設跟排程間隔對齊，再加一點餘裕（windowSlackMinutes），寧可重疊也不要漏 */
 function pushWindow(kind, q) {
-  const explicit = numOrNull(q && (q.window != null ? q.window : q.w));
+  const explicit = boundedInt(q && (q.window != null ? q.window : q.w), 'window', API_LIMITS.pushWindowMinutes);
   if (explicit) return explicit;
   const sc = SINK.schedule || {};
   const every = kind === 'vitals' ? sc.vitalsMinutes : sc.neuroMinutes;
   if (!every) return null; // 交給 vitals.js / neuro.js 自己的預設值
-  return every + (sc.windowSlackMinutes != null ? sc.windowSlackMinutes : 1);
+  const scheduled = every + (sc.windowSlackMinutes != null ? sc.windowSlackMinutes : 1);
+  return boundedInt(scheduled, `${kind} schedule window`, API_LIMITS.pushWindowMinutes);
+}
+
+/**
+ * 逐來源寫進中介資料庫：每一站 / 每一個 Charting DB 各自寫、各自記水位，
+ * 一站失敗不會拖累別站，也不會讓失敗那站的水位假性前進。
+ *
+ * rowsOf 回傳 undefined 代表 collect() 根本沒給這個來源的資料（分組鑰匙對不上）。
+ * 那是程式錯誤，不是「這一輪沒有新資料」——當成失敗處理，否則會安安靜靜寫 0 筆
+ * 又把水位推上去，缺口就再也看不出來了。
+ */
+async function writeBySource(kind, sources, { nameOf, rowsOf, write, startedAtMs }) {
+  const writes = [];
+  for (const source of sources) {
+    const name = nameOf(source);
+    if (!source.ok) {
+      state.recordSourceFailure(kind, name, source.error);
+      writes.push({ source: name, ok: false, error: source.error, stage: 'fetch' });
+      continue;
+    }
+    const rows = rowsOf(source);
+    if (!rows) {
+      const why = `撈取結果沒有「${name}」這個來源的資料，分組鑰匙對不上`;
+      console.error(`  ✗ ${kind} ${why}`);
+      state.recordSourceFailure(kind, name, why);
+      writes.push({ source: name, ok: false, error: why, stage: 'group' });
+      continue;
+    }
+    try {
+      const stats = await write(rows);
+      state.recordSourceSuccess(kind, name, { startedAtMs, stats });
+      writes.push({ source: name, ok: true, ...stats });
+    } catch (e) {
+      state.recordSourceFailure(kind, name, e.message);
+      writes.push({ source: name, ok: false, error: e.message, stage: 'sink' });
+    }
+  }
+  if (!writes.some((x) => x.ok)) {
+    throw httpError(502, `所有 ${kind} 來源都未寫入成功（${writes.map((x) => `${x.source}：${x.error}`).join('；')}）`);
+  }
+  return writes;
+}
+
+/**
+ * 把各來源的寫入統計併成 sink.describe() 讀得懂的同一個形狀（排程 log 用它印一行）。
+ * 截斷的欄位明細要逐欄相加、取最長的那一筆，不然「哪一欄被截、原本多長」會不見。
+ */
+function mergeStats(writes) {
+  const ok = writes.filter((x) => x.ok);
+  const sum = (key) => ok.reduce((n, x) => n + (Number(x[key]) || 0), 0);
+  const truncatedCols = {};
+  for (const w of ok) {
+    for (const [name, t] of Object.entries(w.truncatedCols || {})) {
+      const cur = truncatedCols[name] || { n: 0, max: 0 };
+      truncatedCols[name] = { n: cur.n + (t.n || 0), max: Math.max(cur.max, t.max || 0) };
+    }
+  }
+  const table = (ok.find((x) => x.table) || {}).table || '(未寫入)';
+  return {
+    table, total: sum('total'), written: sum('written'), skipped: sum('skipped'),
+    truncated: sum('truncated'), truncatedCols, ms: sum('ms'),
+  };
 }
 
 async function pushVitals(q = {}) {
@@ -359,11 +438,17 @@ async function pushVitals(q = {}) {
       vitals.collect({ config: CONFIG_PATH, window: pushWindow('vitals', q), site: q.site || null })
     );
     failIfAllDown(res.failures, res.sites.length, res.summary, (s) => s.site);
-    const stats = await sink.writeVitals(res.rows, SINK);
-    // ?site= 只跑部分站台，那不是完整的一輪，記了會讓水位線假性前進，所以跳過
-    if (!q.site) state.recordSuccess('vitals', { startedAtMs, stats });
-    return { kind: 'vitals', beds: res.rows.length, fetched: res.total, ...stats };
+    const writes = await writeBySource('vitals', res.summary, {
+      startedAtMs,
+      nameOf: (s) => s.site,
+      rowsOf: (s) => res.bySite[s.site],
+      write: (rows) => sink.writeVitals(rows, SINK),
+    });
+    // ?site= 只跑一站，沒跑到的站台不算「消失」，這種呼叫不清舊鑰匙
+    if (!q.site) state.pruneSources('vitals', writes.map((x) => x.source));
+    return { kind: 'vitals', beds: res.rows.length, fetched: res.total, ...mergeStats(writes), sources: writes };
   } catch (e) {
+    // collect() 在產生 summary 前就失敗時，沒有來源可標記，才留全域錯誤作相容資訊。
     state.recordFailure('vitals', e.message);
     throw e;
   }
@@ -377,9 +462,15 @@ async function pushNeuro(q = {}) {
       neuro.collect({ config: CONFIG_PATH, window: pushWindow('neuro', q) })
     );
     failIfAllDown(res.failures, res.groups, res.summary, (s) => s.db);
-    const stats = await sink.writeNeuro(res.rows, SINK);
-    state.recordSuccess('neuro', { startedAtMs, stats });
-    return { kind: 'neuro', patients: res.rows.length, fetched: res.total, ...stats };
+    const writes = await writeBySource('neuro', res.summary, {
+      startedAtMs,
+      nameOf: (s) => neuro.sourceKey(s.instance, s.db),
+      rowsOf: (s) => res.byCharting[neuro.sourceKey(s.instance, s.db)],
+      write: (rows) => sink.writeNeuro(rows, SINK),
+    });
+    // neuro 每一輪都會走遍所有 Charting DB，這一輪沒出現的就是真的沒有了
+    state.pruneSources('neuro', writes.map((x) => x.source));
+    return { kind: 'neuro', patients: res.rows.length, fetched: res.total, ...mergeStats(writes), sources: writes };
   } catch (e) {
     state.recordFailure('neuro', e.message);
     throw e;
@@ -410,7 +501,12 @@ function startSchedule() {
       const started = Date.now();
       try {
         const stats = await j.run();
-        console.log(`${new Date().toISOString()} [排程 ${j.name}] ${sink.describe(stats)}`);
+        // 部分來源失敗仍算這一輪成功（其他站的資料有進去），但 log 要看得見是誰沒進去
+        const failed = (stats.sources || []).filter((s) => !s.ok);
+        const tail = failed.length
+          ? `，⚠ ${failed.length} 個來源沒寫入：${failed.map((s) => `${s.source}（${s.stage}）${s.error}`).join('；')}`
+          : '';
+        console.log(`${new Date().toISOString()} [排程 ${j.name}] ${sink.describe(stats)}${tail}`);
       } catch (e) {
         console.error(`${new Date().toISOString()} [排程 ${j.name}] ✗ ${e.message}（${Date.now() - started}ms）`);
       } finally {
@@ -471,6 +567,25 @@ function numOrNull(v) {
   if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/** 有提供 query string 時必須是正整數且不得超過 API 上限；沒提供才回 null 用預設值。 */
+function boundedInt(value, name, max) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw httpError(400, `${name} 必須是正整數`);
+  if (n > max) throw httpError(400, `${name} 不得超過 ${max}`);
+  return n;
+}
+
+function boundedConfiguredInt(value, name, max, fallback) {
+  if (value == null) return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > max) {
+    console.warn(`⚠ 設定 ${name}=${value} 無效，改用 ${fallback}（API 上限 ${max}）`);
+    return fallback;
+  }
+  return n;
 }
 function truthy(v) {
   return v === '1' || v === 'true' || v === 'yes' || v === '';

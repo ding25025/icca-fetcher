@@ -45,13 +45,18 @@ GET /icca/push/vitals?window=30  # 補撈近 30 分鐘
 GET /icca/push/neuro?window=180
 ```
 
-回應長這樣（`inserted` 是新寫進去的、`updated` 是被更新的，其餘就是時間窗重疊撈到的重複資料）：
+回應長這樣。最外層是**寫成功的來源加總**（`total` 減 `skipped` 減 `written` 就是時間窗重疊撈到、已經在表裡的重複資料），`sources[]` 是逐來源的結果：
 
 ```json
 { "kind": "vitals", "beds": 38, "fetched": 1820, "table": "[dbo].[CDSUnvalidatedData]",
-  "total": 1820, "written": 1780, "inserted": 1780, "updated": 0,
-  "skipped": 0, "truncated": 0, "ms": 1204 }
+  "total": 1820, "written": 1780, "skipped": 0, "truncated": 0, "ms": 1204,
+  "sources": [
+    { "source": "cds1", "ok": true, "total": 1200, "written": 1180, "table": "[dbo].[CDSUnvalidatedData]", "ms": 800 },
+    { "source": "cds2", "ok": false, "stage": "fetch", "error": "connect ETIMEDOUT" }
+  ] }
 ```
+
+失敗來源的 `stage` 說明是卡在哪一段：`fetch`（來源端沒撈到）、`sink`（撈到了但寫不進中介庫）、`group`（撈取結果對不上這個來源的分組鑰匙，程式錯誤，會在服務 log 印 ✗）。三種都不會推進該來源的水位。
 
 `sink` 沒啟用時打這兩個會回 400。
 
@@ -80,6 +85,36 @@ GET /icca/push/neuro?window=180
 
 `/icca/neuro`：`window`（不給就用 `neuro.js` 的預設 6 分鐘）、`utc`、`withSummary`、`primaryDb`。
 
+### API 查詢上限
+
+為避免單一 HTTP 請求拉太多資料而壓垮來源 SQL Server，超過上限會回 `400`，例如
+`{ "error": "window 不得超過 60" }`。預設值如下：
+
+| 端點 | 受限參數 | 預設上限 |
+|------|----------|----------|
+| `/icca/vitals` | `window` | 60 分鐘 |
+| `/icca/neuro` | `window` | 1,440 分鐘（24 小時） |
+| `/icca/push/vitals`、`/icca/push/neuro` | `window` | 1,440 分鐘（24 小時） |
+| `/icca/latest` | `n` | 1,000 筆 |
+| `/icca/at?fetch=1` | `n` | 1,000 筆 |
+
+如有明確的容量評估，可在 `databases.config.json` 的 `server` 區塊調整：
+
+```json
+{
+  "server": {
+    "maxVitalsWindowMinutes": 60,
+    "maxNeuroWindowMinutes": 1440,
+    "maxPushWindowMinutes": 1440,
+    "maxLatestRows": 1000,
+    "maxAtRows": 1000
+  }
+}
+```
+
+未提供 `window` 或 `n` 時沿用原本的預設值；有提供時必須是正整數。
+設定值可放寬生命徵象讀取上限，但不會超過 `ICCA_MAX_BACKFILL_HOURS`（預設 24 小時）；ring 的筆數硬上限為 5,000。
+
 ### 診斷端點（給人用，Rhapsody 用不到）
 
 | 路徑 | 說明 | 對應 ring.js 模式 |
@@ -107,7 +142,8 @@ GET /icca/at?at=2026-07-22%2003:00&fetch=1&param=4102
 
 - **全部**站台 / charting 分片都失敗 → **502**，body 是 `{ "error": "全部 7 個來源都失敗（cds1：…）" }`。這一段刻意不回空陣列：`[]` 配 200 會讓下游把故障當成「這次沒有資料」，等有人發現已經斷很久了。同樣的道理，**這一輪不會寫進中介資料庫**——0 筆寫進去跟「這段時間真的沒資料」長得一模一樣。
 - **部分**失敗 → 照樣 **200**，剩下的資料照送（跟命令列的行為一致），服務 log 會寫一行警告；要逐站狀態就加 `&withSummary=1`。
-- 寫入本身失敗（中介資料庫連不上、權限不足、表被鎖住）→ **500**，整批 rollback，不會留半批資料。排程模式下會在 log 寫一行 `[排程 vitals] ✗ …`，服務照常活著、下一輪再試。
+- 寫入是**逐來源**各寫各的：某一個 CDS 站 / Charting DB 寫失敗（連不上、權限不足、表被鎖住）→ 那一批 rollback、不會留半批，其他來源照常寫進去，回 **200** 並在 `sources[]` 標 `ok: false`；排程模式下 log 那一行後面會接「⚠ N 個來源沒寫入：…」。
+- **所有**來源都沒寫成功 → **502**，body 帶每個來源的原因。
 - 設定錯誤、SQL 檔不見、primary 全滅 → 4xx / 5xx 加 `{ "error": "..." }`。
 
 同一個端點被重複觸發時，第二個請求會**排隊**等第一個跑完，不會兩輪同時打 DB。內建排程則是**直接跳過**：上一輪還沒結束就不排隊，log 寫一行警告——排隊只會越積越多，而且下一輪的時間窗本來就蓋得到漏掉的那一段。
@@ -118,7 +154,7 @@ GET /icca/at?at=2026-07-22%2003:00&fetch=1&param=4102
 
 ### 先看「上次成功是幾點」
 
-每一輪成功寫入後，時間會記在 `.sink-state.json`（工作目錄下，路徑可用 `ICCA_STATE` 換；見 `state.js`）。這是為了回答補資料時唯一重要的問題：**該從幾點開始撈**。發現問題時先打 `/health`：
+每一輪成功寫入後，時間會**逐來源**記在 `.sink-state.json`（工作目錄下，路徑可用 `ICCA_STATE` 換；見 `state.js`）。這是為了回答補資料時唯一重要的問題：**該從幾點開始撈**。發現問題時先打 `/health`：
 
 ```bat
 curl "http://127.0.0.1:8770/health?pretty=1"
@@ -127,21 +163,36 @@ curl "http://127.0.0.1:8770/health?pretty=1"
 ```json
 "lastWrite": {
   "vitals": {
-    "lastSuccessAt": "2026-08-18 09:12:03",
-    "ageMinutes": 143,
-    "suggestWindowMinutes": 144,
-    "maxBackfillHours": 24,
+    "sourceCount": 7,
+    "failedSources": ["cds2"],
+    "oldestSource": "cds2",
+    "oldestSuccessAt": "2026-08-18 07:00:00",
+    "oldestAgeMinutes": 138,
+    "suggestWindowMinutes": 139,
     "gapBeyondBackfill": false,
-    "lastError": null
+    "lastError": null,
+    "sources": {
+      "cds1": { "lastSuccessAt": "2026-08-18 09:12:03", "ageMinutes": 5,
+                  "suggestWindowMinutes": 6, "lastError": null },
+      "cds2": { "lastSuccessAt": "2026-08-18 07:00:00", "ageMinutes": 138,
+                  "suggestWindowMinutes": 139, "lastError": "connect ETIMEDOUT" }
+    }
   }
 }
 ```
 
-- `lastSuccessAt` 是**那一輪開始撈的時間**，不是寫完的時間——從這個點往後補才不會漏掉「撈完到寫完」之間進來的資料。
-- `suggestWindowMinutes` 直接就是要下的 `window`（已含餘裕）。
-- 失敗不會讓 `lastSuccessAt` 前進，缺口才看得出來；最後一次的錯誤訊息記在 `lastError`。
-- 服務啟動時也會把這兩行印進 log，重啟後不必特地去查就知道停了多久。
-- **部分**站台失敗的那一輪仍算成功（資料有進去，水位線照樣前進）。那一站自己的缺口不在這裡看——看服務 log 的警告，或 `&withSummary=1` 的逐站狀態。
+- `vitals.sources` 是每一個 CDS 站的水位；`neuro.sources` 是每一個 `SQL instance\\Charting DB` 的水位。來源獨立寫入成功才會推進自己的水位。
+- 每個來源的 `lastSuccessAt` 是**那一輪開始撈的時間**，不是寫完的時間——從這個點往後補才不會漏掉「撈完到寫完」之間進來的資料。
+- 各來源的 `suggestWindowMinutes` 直接就是補該來源時要下的 `window`（已含餘裕）。最外層那個是**最舊的那一站**的，一次補齊所有來源就下它。
+- 最外層的 `lastError` 是「整輪都還沒開始就掛掉」的錯誤（設定檔壞了、primary 全滅），那種情況沒有來源可以歸咎。
+- 失敗來源不會讓自己的 `lastSuccessAt` 前進，`failedSources` 與該來源的 `lastError` 會保留錯誤。
+- 服務啟動時也會把這兩行印進 log，重啟後不必特地去查就知道停了多久：
+
+  ```
+  ⚠ vitals：7 個來源，最舊的 cds2 上次成功 2026-08-18 07:00:00（138 分鐘前，要一次補齊就下 --window 139），⚠ 1 個來源有錯：cds2
+  ```
+- 要補單一 CDS 站時，加上 `site`，例如：`/icca/push/vitals?site=cds2&window=139`。neuro 的 Charting DB 由程式依住院病人的 `HostDb` 自動分組；它的 `suggestWindowMinutes` 用於下一輪全域 neuro 補撈。
+- 來源會來會走（Charting DB 裡的病人都出院、CDS 站台改名）。這一輪沒出現的來源**不會馬上被清掉**——暫時沒病人的來源要留住水位；要等到它距上次成功超過 24 小時（缺口本來就補不回來了）才從狀態檔移除，log 會寫一行。`?site=` 那種只跑一站的呼叫不會清任何東西。
 
 檔案是純紀錄，**排程行為完全不受影響**——開多大的窗還是人決定。刪掉它只會失去這個起點，不影響撈取。
 

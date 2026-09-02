@@ -1344,6 +1344,7 @@ async function collect(opts = {}) {
   const settled = await Promise.allSettled(sites.map((s) => runSite(s, settings, args, registry, anchors)));
 
   const merged = [];
+  const bySite = {};
   const summary = [];
   let failures = 0;
 
@@ -1351,6 +1352,8 @@ async function collect(opts = {}) {
     const name = sites[i].name;
     if (s.status === 'fulfilled') {
       merged.push(...s.value.rows);
+      // server.js 寫入中介庫時需要逐站處理，才能只推進真的寫成功的站台水位。
+      bySite[name] = groupByBed(s.value.rows);
       summary.push({
         site: name,
         ok: true,
@@ -1383,7 +1386,7 @@ async function collect(opts = {}) {
 
   // 一床一筆（與 neuro.js 同一個形狀），量測值收在 records[]。
   // 每一筆只留下游用得到的欄位，站台 / 來源表 / parameterId 這些內部資訊不輸出。
-  return { settings, sites, summary, rows: groupByBed(merged), total: merged.length, failures };
+  return { settings, sites, summary, rows: groupByBed(merged), bySite, total: merged.length, failures };
 }
 
 // ---------- 主流程 ----------
@@ -1441,8 +1444,12 @@ async function main() {
       const stats = await sink.writeVitals(res.rows, sinkSettings);
       console.log(`已寫入 ${sink.describe(stats)}`);
       // 記下「最後一次成功寫入」，之後要補撈才知道從幾點開始（見 state.js）。
-      // --site 只跑部分站台，那不是完整的一輪，記了會讓水位線假性前進，所以跳過。
-      if (!args.site) state.recordSuccess('vitals', { startedAtMs: started, stats });
+      // 命令列是整批一次寫進去，所以這一輪成功的站台水位一起前進；失敗的站台不動，
+      // 它自己的缺口留著下次補。逐站記之後 --site 也不必再特別跳過。
+      for (const s of res.summary) {
+        if (s.ok) state.recordSourceSuccess('vitals', s.site, { startedAtMs: started, stats: { table: stats.table } });
+        else state.recordSourceFailure('vitals', s.site, s.error);
+      }
     }
 
     if (wantFile) {
