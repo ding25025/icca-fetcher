@@ -25,7 +25,7 @@ JOIN CdsParameterMap  ON CdsParameterMap.propName              = Attribute.propN
 --                   AND CdsParameterMap.cdsParameterId > 0
 WHERE
       i.isPrimary = 1
-  AND i.terseLabel IN (N'體溫(˚C)', N'HR', N'ABP', N'NBP', N'SpO2', N'ICP', N'PAP', N'PCWP', N'CVP')
+  AND i.terseLabel IN ( N'HR', N'ABP', N'NBP', N'SpO2', N'ICP', N'PAP', N'PCWP', N'CVP')
   AND EXISTS (
       SELECT 1
       FROM dbo.Document      d  WITH (NOLOCK)
@@ -38,7 +38,7 @@ WHERE
                                              AND sr.isPrimary       = 1
       JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
                                              AND ar.isPrimary       = 1
-      WHERE d.displayLabel IN (N'生命徵象及治療紀錄', N'兒醫生命徵象及治療紀錄')
+      WHERE d.displayLabel IN (N'生命徵象及治療紀錄')
         AND ar.conceptId   = i.conceptId
   )
 ORDER BY i.terseLabel
