@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICCA Fetcher API 文件</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --ink:#14202b; --muted:#587080; --line:#d9e1e8; --blue:#1269a4; --green:#08785a; --orange:#9a5b14; --code:#17232d; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI","Microsoft JhengHei",sans-serif; }
+  main { max-width:1040px; margin:auto; padding:48px 24px 80px; } header { border-left:6px solid var(--blue); padding:8px 24px; margin-bottom:34px; }
+  h1 { margin:0; font-size:clamp(28px,5vw,42px); } h2 { margin:42px 0 14px; font-size:25px; } h3 { margin:28px 0 8px; font-size:19px; }
+  p { margin:8px 0 14px; } .muted { color:var(--muted); } .tag { display:inline-block; border-radius:999px; padding:2px 9px; font:700 12px ui-monospace,Consolas,monospace; color:#075d45; background:#dff5ed; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px 22px; margin:14px 0; box-shadow:0 1px 3px #14202b0b; }
+  .warning { border-left:4px solid var(--orange); background:#fff8ed; padding:12px 16px; } code,pre { font-family:ui-monospace,"Cascadia Mono",Consolas,monospace; } code { color:#9e371f; } pre { overflow:auto; padding:16px; border-radius:9px; background:var(--code); color:#eaf2f8; line-height:1.55; } pre code { color:inherit; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; } th,td { text-align:left; padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:top; } th { background:#eaf1f6; } tr:last-child td { border-bottom:0; }
+  a { color:var(--blue); } .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; } .endpoint { font-family:ui-monospace,Consolas,monospace; font-weight:700; }
+  @media (prefers-color-scheme:dark) { :root { --bg:#101820; --card:#17222c; --ink:#e5edf3; --muted:#aac0ce; --line:#30414e; --blue:#70b7e8; --green:#58d6ae; --orange:#efb66d; --code:#0c1319; } th { background:#20303c; } .warning { background:#332919; } code { color:#ffa991; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="tag">INTERNAL API · GET · JSON</div>
+    <h1>ICCA Fetcher API</h1>
+    <p class="muted">ICCA CDS、Primary 與 Charting DB 的內部擷取與中介庫同步服務。</p>
+  </header>
+
+  <section>
+    <h2>快速開始</h2>
+    <div class="card">
+      <p>在專案根目錄設定好 <code>databases.config.json</code> 與 <code>sink.config.json</code> 後啟動：</p>
+      <pre><code>node server.js
+# 預設：http://127.0.0.1:8770</code></pre>
+      <p>先確認服務狀態：</p>
+      <pre><code>curl http://127.0.0.1:8770/health</code></pre>
+    </div>
+    <div class="warning">此服務設計為內部使用。預設只綁定 <code>127.0.0.1</code>；若改為其他主機可連線，建議設定 <code>ICCA_TOKEN</code>。</div>
+  </section>
+
+  <section>
+    <h2>端點總覽</h2>
+    <table>
+      <thead><tr><th>端點</th><th>用途</th><th>是否寫入中介庫</th></tr></thead>
+      <tbody>
+        <tr><td class="endpoint">/health</td><td>服務狀態、同步水位與補撈建議；寫入過期或失敗時回 503</td><td>否</td></tr>
+        <tr><td class="endpoint">/icca/vitals</td><td>取得生命徵象 JSON</td><td>否</td></tr>
+        <tr><td class="endpoint">/icca/neuro</td><td>取得神經／Charting 紀錄 JSON</td><td>否</td></tr>
+        <tr><td class="endpoint">/icca/push/vitals</td><td>擷取各 CDS 站並寫入中介庫</td><td>是</td></tr>
+        <tr><td class="endpoint">/icca/push/neuro</td><td>擷取各 Charting DB 並寫入中介庫</td><td>是</td></tr>
+        <tr><td class="endpoint">/icca/head</td><td>目前 CDS 環狀表 head</td><td>否</td></tr>
+        <tr><td class="endpoint">/icca/order</td><td>26 張 CDS 輪替表的新舊順序</td><td>否</td></tr>
+        <tr><td class="endpoint">/icca/latest</td><td>跨表取得最新原始資料</td><td>否</td></tr>
+        <tr><td class="endpoint">/icca/at</td><td>定位指定時間所在表；可順便取得資料</td><td>否</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>生命徵象</h2>
+    <div class="grid">
+      <div class="card"><h3><code>GET /icca/vitals</code></h3><p>回傳一床一筆，每床的量測值位於 <code>records[]</code>。不寫入中介庫。</p></div>
+      <div class="card"><h3><code>GET /icca/push/vitals</code></h3><p>逐 CDS 站擷取並寫入中介庫。每站獨立成功／失敗與水位。</p></div>
+    </div>
+    <pre><code>curl "http://127.0.0.1:8770/icca/vitals?window=15&amp;site=cds1,cds2&amp;withSummary=1"
+curl "http://127.0.0.1:8770/icca/push/vitals?window=30"
+curl "http://127.0.0.1:8770/icca/push/vitals?site=cds2&amp;window=139"</code></pre>
+    <table>
+      <thead><tr><th>參數</th><th>說明</th></tr></thead>
+      <tbody>
+        <tr><td><code>window</code> 或 <code>w</code></td><td>最近幾分鐘；讀取 API 預設上限 60 分鐘，push 預設上限 1,440 分鐘。</td></tr>
+        <tr><td><code>site</code></td><td>指定 CDS 站台，可用逗號分隔，例如 <code>cds1,cds2</code>。</td></tr>
+        <tr><td><code>param</code></td><td>指定 parameterId 清單。</td></tr>
+        <tr><td><code>utc=1</code></td><td>時間保留 UTC；預設回傳台灣時區顯示時間。</td></tr>
+        <tr><td><code>withSummary=1</code></td><td>回傳 <code>{ summary, rows }</code>，包含每站成功或失敗資訊。</td></tr>
+        <tr><td><code>noPatients=1</code></td><td>不查 Primary DB 病人資料。</td></tr>
+        <tr><td><code>keepUnmatched=1</code></td><td>保留無法對應病歷號的床位。</td></tr>
+      </tbody>
+    </table>
+    <pre><code>[
+  {
+    "bed": "ICU-01",
+    "lifetimeNumber": "A123456",
+    "records": [
+      { "terseLabel": "ABP", "propName": "systolic", "numericValue": 118,
+        "chartTime": "2026-09-02 10:20:00", "storeTime": "2026-09-02 10:20:05" }
+    ]
+  }
+]</code></pre>
+  </section>
+
+  <section>
+    <h2>神經與 Charting 紀錄</h2>
+    <p><code>/icca/neuro</code> 與 <code>/icca/push/neuro</code> 先從 Primary DB 找出在床病人與其 <code>HostDb</code>，再依實際的 Charting DB 分組查詢 <code>PtIntervention</code>。</p>
+    <pre><code>curl "http://127.0.0.1:8770/icca/neuro?window=60&amp;withSummary=1"
+curl "http://127.0.0.1:8770/icca/push/neuro?window=180"</code></pre>
+    <table>
+      <thead><tr><th>參數</th><th>說明</th></tr></thead>
+      <tbody>
+        <tr><td><code>window</code> 或 <code>w</code></td><td>最近幾分鐘，最多 1,440 分鐘。</td></tr>
+        <tr><td><code>utc=1</code></td><td>時間保留 UTC。</td></tr>
+        <tr><td><code>primaryDb</code></td><td>指定 Primary 資料庫，主要用於排錯。</td></tr>
+        <tr><td><code>withSummary=1</code></td><td>包含各 Charting DB 分片的查詢狀態。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>健康檢查與監控</h2>
+    <p><code>GET /health</code> 不連資料庫、不需要 token，只讀本機的寫入紀錄。建議每 1～5 分鐘拉一次：</p>
+    <table>
+      <thead><tr><th>status</th><th>HTTP</th><th>意義</th></tr></thead>
+      <tbody>
+        <tr><td><code>ok</code></td><td>200</td><td>各種類都在門檻內，且沒有失敗紀錄。</td></tr>
+        <tr><td><code>starting</code></td><td>200</td><td>剛啟動、還沒有成功紀錄，仍在寬限期（預設 2 分鐘）。可稍後重查。</td></tr>
+        <tr><td><code>degraded</code></td><td>503</td><td>寫入失敗或資料過期，應告警並查 <code>reasons</code>；不要拿它當自動重啟的條件。</td></tr>
+      </tbody>
+    </table>
+    <p>原有的 <code>lastWrite</code> 不變，另外新增 <code>checks.vitals</code> 與 <code>checks.neuro</code>：</p>
+    <pre><code>{
+  "status": "degraded",
+  "checks": {
+    "vitals": { "status": "degraded", "staleMinutes": 15,
+                "reasons": ["stale", "write_failed"], "failedSources": ["cds2"] },
+    "neuro":  { "status": "ok", "staleMinutes": 15, "reasons": [], "failedSources": [] }
+  },
+  "lastWrite": { }
+}</code></pre>
+    <table>
+      <thead><tr><th>reasons</th><th>意義</th></tr></thead>
+      <tbody>
+        <tr><td><code>write_failed</code></td><td>整輪或某個來源上一次寫入失敗。</td></tr>
+        <tr><td><code>stale</code></td><td>最舊的來源超過 <code>staleMinutes</code> 沒有成功寫入。</td></tr>
+        <tr><td><code>no_success</code></td><td>超過寬限期仍沒有任何成功紀錄（常見於排程從未執行）。</td></tr>
+        <tr><td><code>gap_beyond_backfill</code></td><td>缺口已超過補撈上限，補撈補不回來，需要人工處理。</td></tr>
+      </tbody>
+    </table>
+    <p>有內建排程的種類會自動納入監控，門檻預設為排程間隔的三倍（每 5 分鐘跑一次即 15 分鐘）。用外部排程器時請自己填門檻，否則第一次寫入之前偵測不到「排程從未執行」。<code>/health</code> 只證明本機有沒有成功寫入，不能證明來源端仍在產生新資料。</p>
+  </section>
+
+  <section>
+    <h2>併發與逾時</h2>
+    <p>工作分成 <code>vitals</code>、<code>neuro</code> 與各站台的 <code>ring:&lt;站台名稱&gt;</code>，每組同時只跑一輪；讀取與 push 共用同一組名額。ring 四個診斷端點在<b>同一站台</b>共用一組，不同站台可以並行；省略 <code>site</code> 或大小寫不同但指向同一站，仍算同一組。<code>/health</code> 不排隊。內建排程也共用名額，但忙碌時直接跳過、不排隊。</p>
+    <ul>
+      <li>同組已有一輪在跑時，後來的請求會排隊（預設最多 2 筆、等待上限 30 秒）。</li>
+      <li>隊伍已滿或等待逾時回 <strong>503</strong>，附 <code>Retry-After: 30</code>。請照這個秒數退避，不要立刻重送。</li>
+      <li>開始執行後整輪期限預設 180 秒，超過回 <strong>504</strong>，服務會要求取消該輪 SQL、阻止後續查詢與交易提交。</li>
+      <li>504 <strong>不代表完全沒寫入</strong>：已完成的來源不會撤回，補撈前先查 <code>/health</code>。</li>
+      <li>呼叫端的 timeout 應大於「等待上限 + 整輪期限」（預設合計 210 秒）。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>同步結果與補資料</h2>
+    <p>push 回應的 <code>sources[]</code> 是逐來源結果。<code>ok: false</code> 不會推進該來源水位；其餘來源仍可正常寫入。</p>
+    <pre><code>{
+  "kind": "vitals", "fetched": 1820, "written": 1780,
+  "sources": [
+    { "source": "cds1", "ok": true, "written": 1180 },
+    { "source": "cds2", "ok": false, "stage": "fetch", "error": "connect ETIMEDOUT" }
+  ]
+}</code></pre>
+    <p>遇到失敗先查 <code>/health?pretty=1</code>，取該來源的 <code>suggestWindowMinutes</code>。CDS 可指定站台補撈：</p>
+    <pre><code>curl "http://127.0.0.1:8770/health?pretty=1"
+curl "http://127.0.0.1:8770/icca/push/vitals?site=cds2&amp;window=139"</code></pre>
+  </section>
+
+  <section>
+    <h2>CDS 環狀表診斷</h2>
+    <pre><code>curl "http://127.0.0.1:8770/icca/head?site=cds1"
+curl "http://127.0.0.1:8770/icca/order?site=cds1"
+curl "http://127.0.0.1:8770/icca/latest?site=cds1&amp;n=100&amp;param=4102"
+curl "http://127.0.0.1:8770/icca/at?site=cds1&amp;at=2026-09-02%2010:00&amp;fetch=1&amp;n=100"</code></pre>
+    <table>
+      <thead><tr><th>參數</th><th>適用端點與說明</th></tr></thead>
+      <tbody>
+        <tr><td><code>site</code></td><td>所有 ring 端點；指定 CDS 站。</td></tr>
+        <tr><td><code>n</code></td><td><code>latest</code>、<code>at&amp;fetch=1</code>；預設上限 1,000 筆。</td></tr>
+        <tr><td><code>param</code>、<code>patient</code>、<code>device</code></td><td>篩選原始資料。</td></tr>
+        <tr><td><code>from</code>、<code>to</code></td><td>依量測時間篩選。</td></tr>
+        <tr><td><code>at</code>、<code>by=store|measure</code>、<code>fetch=1</code></td><td>定位時間點；加 fetch 同時取回該表附近資料。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>回應與錯誤</h2>
+    <table>
+      <thead><tr><th>HTTP 狀態</th><th>意義</th></tr></thead>
+      <tbody>
+        <tr><td>200</td><td>成功；部分來源失敗時也會是 200，請看 <code>summary</code> 或 <code>sources[]</code>。</td></tr>
+        <tr><td>400</td><td>參數不合法、超過 API 上限，或 sink 未啟用。</td></tr>
+        <tr><td>401</td><td>設定 token 時未提供或 token 不正確。</td></tr>
+        <tr><td>502</td><td>所有來源都失敗，或全部來源都無法寫入中介庫。</td></tr>
+        <tr><td>503</td><td>同組工作忙碌或排隊逾時（附 <code>Retry-After: 30</code>）；ring 端點無法取得資料庫連線；<code>/health</code> 判定為 degraded。</td></tr>
+        <tr><td>504</td><td>整輪執行超過 <code>jobTimeoutMs</code>，已要求取消查詢。可能已有部分來源寫入，先查 <code>/health</code> 再決定補撈。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>設定與限制</h2>
+    <p>可在 <code>databases.config.json</code> 的 <code>server</code> 區塊調整 API 上限：</p>
+    <pre><code>{
+  "server": {
+    "maxVitalsWindowMinutes": 60,
+    "maxNeuroWindowMinutes": 1440,
+    "maxPushWindowMinutes": 1440,
+    "maxLatestRows": 1000,
+    "maxAtRows": 1000,
+
+    "accessLog": false,
+    "maxQueuedRequests": 2,
+    "queueTimeoutMs": 30000,
+    "jobTimeoutMs": 180000,
+
+    "health": {
+      "startupGraceMinutes": 2,
+      "staleMinutes": { "vitals": 15, "neuro": 15 }
+    }
+  }
+}</code></pre>
+    <table>
+      <thead><tr><th>設定</th><th>預設</th><th>說明</th></tr></thead>
+      <tbody>
+        <tr><td><code>accessLog</code></td><td>true</td><td>設 false 只留錯誤 log，避免高頻輪詢洗版。</td></tr>
+        <tr><td><code>maxQueuedRequests</code></td><td>2</td><td>每組最多幾筆排隊（不含執行中那筆）；0 表示忙碌即拒絕，上限 100。</td></tr>
+        <tr><td><code>queueTimeoutMs</code></td><td>30000</td><td>排隊等待上限，上限 600000。</td></tr>
+        <tr><td><code>jobTimeoutMs</code></td><td>180000</td><td>整輪期限，含撈取與寫入，上限 3600000。大範圍手動補撈前可調高。</td></tr>
+        <tr><td><code>health.startupGraceMinutes</code></td><td>2</td><td>啟動後多久之內沒有成功紀錄仍算 <code>starting</code>。</td></tr>
+        <tr><td><code>health.staleMinutes.&lt;種類&gt;</code></td><td>排程間隔 ×3</td><td>新鮮度門檻（分鐘）；設 <code>false</code> 可把只手動跑的種類排除監控。</td></tr>
+      </tbody>
+    </table>
+    <p>以上設定修改後需重啟服務才會生效。</p>
+    <p>時間窗上限仍不會超過 <code>ICCA_MAX_BACKFILL_HOURS</code>（預設 24 小時），ring 單次筆數硬上限為 5,000。完整操作細節請見 <a href="../SERVER.md">SERVER.md</a>。</p>
+  </section>
+</main>
+</body>
+</html>

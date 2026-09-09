@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const work = require('./work-limits.js');
 
 /**
  * 生命徵象抓取工具（多站台 + 環狀表定位）
@@ -285,6 +286,7 @@ async function newPool(conn) {
 }
 
 async function connect(connection, queryTimeoutMs) {
+  work.checkpoint();
   const conn = { ...connection };
   if (conn.password) conn.password = resolveSecret(conn.password);
   if (conn.user) conn.user = resolveSecret(conn.user);
@@ -502,7 +504,7 @@ function discoverOnce(key, fn) {
 
 // ---------- 從 primary 動態查出要撈哪些 parameterId ----------
 async function discoverParameterIds(pool, sqlText) {
-  const r = await pool.request().query(sqlText);
+  const r = await work.request(pool).query(sqlText);
   const out = { ids: [], labels: {}, props: {} };
   // 欄名沿用 parameters.sql：terseLabel / propName / cdsParameterId
   for (const row of r.recordset || []) {
@@ -602,7 +604,8 @@ function groupByBed(rows) {
  * 把查回來的列變成 Map<床號, { lifetimeNumber, encounterNumber }>。
  *
  * 鑰匙是床號：primary 的 Bed.displayLabel 對 CDS 的 UdsBed.label。
- * 欄名就照 patients.sql 的 bed / lifetimeNumber / encounterNumber。
+ * 欄名就照 patients.sql 的 bed / lifetimeNumber / encounterNumber，只看這三欄；
+ * patients.sql 現在沒選 encounterNumber，那一欄就是 null。
  *
  * 回傳 { byBed, duplicates }。床號不像 bedId 保證唯一——不同單位可能有同名的床，
  * 撞在一起會把病歷號接到別人身上，所以重複的要回報出來，不能默默吃掉。
@@ -631,7 +634,7 @@ function indexPatientsByBed(rows) {
 
 /** 給測試與外部呼叫用：連線跑一次 SQL 再索引起來（只回 Map） */
 async function fetchPatients(pool, sqlText) {
-  const r = await pool.request().query(stripBatchDirectives(sqlText));
+  const r = await work.request(pool).query(stripBatchDirectives(sqlText));
   return indexPatientsByBed(r.recordset || []).byBed;
 }
 
@@ -689,7 +692,7 @@ async function runPatientSql(primary, candidates, sqlText, timeout) {
     let pool;
     try {
       pool = await connect({ ...primary, database }, timeout);
-      const r = await pool.request().query(stripBatchDirectives(sqlText));
+      const r = await work.request(pool).query(stripBatchDirectives(sqlText));
       return { database, rows: r.recordset || [], errors };
     } catch (e) {
       errors.push({ database, message: e.message });
@@ -809,7 +812,7 @@ async function checkPatients(sites, settings, args, registry) {
     let pool;
     try {
       pool = await connect(conn, timeout);
-      const r = await pool.request().query(
+      const r = await work.request(pool).query(
         'SET LOCK_TIMEOUT 3000; SELECT label FROM dbo.UdsBed WITH (NOLOCK)'
       );
       const beds = (r.recordset || []).map((b) => b.label);
@@ -926,7 +929,7 @@ async function fetchVitals(pool, table, parameterIds, windowMinutes, cfg) {
   const t = safeIdent(table, 'table');
   const idParams = parameterIds.map((_, i) => `@p${i}`).join(', ');
 
-  const req = pool.request().input('win', sql.Int, windowMinutes);
+  const req = work.request(pool).input('win', sql.Int, windowMinutes);
   parameterIds.forEach((v, i) => req.input(`p${i}`, sql.Int, v));
 
   // bed（UdsBed.label）就是接 primary 病人資料的鑰匙，本來就要輸出，不必再多撈 bedId。
@@ -1342,6 +1345,7 @@ async function collect(opts = {}) {
 
   console.log(`開始平行查詢 ${sites.length} 個站台...`);
   const settled = await Promise.allSettled(sites.map((s) => runSite(s, settings, args, registry, anchors)));
+  work.checkpoint();
 
   const merged = [];
   const bySite = {};

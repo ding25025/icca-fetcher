@@ -5,6 +5,7 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
+    "test": "node --test",
     "start": "node index.js",
     "start:config": "node index.js --config",
     "vitals": "node vitals.js --pretty",

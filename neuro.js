@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const work = require('./work-limits.js');
 
 /**
  * 神經評估抓取工具（每 5 分鐘撈有異動的病歷紀錄）
@@ -294,7 +295,7 @@ async function fetchNeuro(pool, { interventionIds, encounterIds, windowMinutes, 
   for (let off = 0; off < encounterIds.length; off += chunk) {
     const enc = encounterIds.slice(off, off + chunk);
     const q = buildNeuroQuery(interventionIds, enc, settings);
-    const req = pool.request().input('win', sql.Int, windowMinutes);
+    const req = work.request(pool).input('win', sql.Int, windowMinutes);
     interventionIds.forEach((v, i) => req.input(`i${i}`, sql.UniqueIdentifier, v));
     enc.forEach((v, i) => req.input(`e${i}`, sql.UniqueIdentifier, v));
     const r = await req.query(q);
@@ -346,7 +347,7 @@ async function fetchOrders(pool, { orderSql, encounterIds, windowMinutes, settin
   const out = [];
   for (let off = 0; off < encounterIds.length; off += chunk) {
     const enc = encounterIds.slice(off, off + chunk);
-    const req = pool.request().input('win', sql.Int, windowMinutes);
+    const req = work.request(pool).input('win', sql.Int, windowMinutes);
     enc.forEach((v, i) => req.input(`oe${i}`, sql.UniqueIdentifier, v));
     const r = await req.query(buildOrderQuery(orderSql, enc, settings));
     out.push(...(r.recordset || []));
@@ -365,10 +366,10 @@ async function runPrimary(primary, candidates, { intSql, encSql, wantInterventio
     let pool;
     try {
       pool = await connect({ ...primary, database }, timeout);
-      const encRows = (await pool.request().query(V.stripBatchDirectives(encSql))).recordset || [];
+      const encRows = (await work.request(pool).query(V.stripBatchDirectives(encSql))).recordset || [];
       let interventions = null;
       if (wantInterventions) {
-        const intRows = (await pool.request().query(V.stripBatchDirectives(intSql))).recordset || [];
+        const intRows = (await work.request(pool).query(V.stripBatchDirectives(intSql))).recordset || [];
         interventions = indexInterventions(intRows);
       }
       return { database, encounters: indexEncounters(encRows), interventions, errors };

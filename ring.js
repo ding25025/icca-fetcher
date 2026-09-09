@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const work = require('./work-limits.js');
 
 /**
  * 環狀資料表（Ring Buffer）工具
@@ -398,7 +399,7 @@ async function scanRing(pool, tables, ring) {
       })
       .join('\nUNION ALL\n');
 
-    const r = await pool.request().query(union);
+    const r = await work.request(pool).query(union);
     const byIdx = new Map((r.recordset || []).map((row) => [Number(row.idx), row]));
     if (byIdx.size === tables.length) {
       return tables.map((t) => toStat({ ...t, table: safeIdent(t.table, 'table') }, byIdx.get(t.index), sameCol, wantCounts));
@@ -413,8 +414,7 @@ async function scanRing(pool, tables, ring) {
   for (const t of tables) {
     const table = safeIdent(t.table, 'table');
     try {
-      const r = await pool
-        .request()
+      const r = await work.request(pool)
         .query(
           `SELECT GETUTCDATE() AS dbNow, MAX([${headCol}]) AS maxTime, MIN([${headCol}]) AS minTime${cnt}${alt} FROM [${table}] WITH (NOLOCK)`
         );
@@ -625,7 +625,7 @@ async function fetchLatest(pool, orderedNewToOld, ring, latestN, filter) {
     const remaining = latestN - rows.length;
     const table = safeIdent(s.table, 'table');
 
-    const req = pool.request().input('n', sql.Int, remaining);
+    const req = work.request(pool).input('n', sql.Int, remaining);
     where.apply(req);
     const r = await req.query(
       `SELECT TOP (@n) ${selectClause} FROM [${table}]${where.sql} ORDER BY [${orderCol}] DESC`
@@ -649,7 +649,7 @@ async function fetchAround(pool, stat, ring, limit, filter, axis, targetMs) {
   const where = buildWhere(ring, filter);
   const table = safeIdent(stat.table, 'table');
 
-  const req = pool.request().input('n', sql.Int, limit).input('at', sql.DateTime2, new Date(targetMs));
+  const req = work.request(pool).input('n', sql.Int, limit).input('at', sql.DateTime2, new Date(targetMs));
   where.apply(req);
   const clause = where.sql ? `${where.sql} AND [${axisCol}] <= @at` : ` WHERE [${axisCol}] <= @at`;
   const r = await req.query(
@@ -684,7 +684,7 @@ async function fetchParamCatalog(pool, targets, ring, filter) {
   for (const s of targets) {
     if (isEmptyTable(s) || s.error) continue;
     const table = safeIdent(s.table, 'table');
-    const req = pool.request();
+    const req = work.request(pool);
     where.apply(req);
     const r = await req.query(
       `SELECT [${paramCol}] AS parameterId, [label] AS label, [units] AS units,

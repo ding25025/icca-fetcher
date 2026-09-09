@@ -4,6 +4,13 @@
   "output": "icca-data.json",
   "queryTimeoutMs": 60000,
 
+  "server": {
+    "accessLog": false,
+    "maxQueuedRequests": 2,
+    "queueTimeoutMs": 30000,
+    "jobTimeoutMs": 180000
+  },
+
   "databases": [
     {
       "name": "db1",

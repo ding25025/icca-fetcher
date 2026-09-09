@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const work = require('./work-limits.js');
 
 /**
  * 撈完直接寫進中介資料庫（sink）
@@ -314,7 +315,7 @@ async function ensureTable(pool, spec, settings) {
   // 用 sp_executesql 而不是直接寫 CREATE TABLE：DDL 在 IF 區塊裡會在編譯期就被檢查，
   // 表已經存在時「索引重複」之類的錯誤會在還沒執行到 IF 之前就冒出來。
   const quoted = (s) => `EXEC sp_executesql N'${s.replace(/'/g, "''")}';`;
-  await pool.request().batch(
+  await work.request(pool).batch(
     `SET NOCOUNT ON;
 IF OBJECT_ID(N'${d.full}', N'U') IS NULL
 BEGIN
@@ -487,6 +488,7 @@ SELECT @@ROWCOUNT AS n;`;
  * 沒有 updated：兩張表都只新增，寫進去的列不會被改。
  */
 async function writeRows(kind, rows, settings) {
+  work.checkpoint();
   const spec = SPECS[kind];
   if (!spec) throw new Error(`未知的 sink 種類：${kind}`);
   assertConfigured(settings);
@@ -523,6 +525,7 @@ async function writeRows(kind, rows, settings) {
 
     // 交易會把後面這幾個請求釘在同一條連線上，#stage 才活得過整段流程
     const tx = new sql.Transaction(pool);
+    work.checkpoint();
     await tx.begin();
     try {
       const stage = '#stage';
@@ -539,16 +542,17 @@ async function writeRows(kind, rows, settings) {
       // "There is already an object named '#stage'"。所以建之前先清掉。
       // 用 OBJECT_ID 判斷而不是 DROP TABLE IF EXISTS：後者要 SQL Server 2016 以上，
       // 這一句在更舊的版本也要能跑。
-      await new sql.Request(tx).batch(
+      await work.request(tx).batch(
         `SET NOCOUNT ON;
 IF OBJECT_ID('tempdb..${stage}') IS NOT NULL DROP TABLE ${stage};
 CREATE TABLE ${stage} (\n${stageCols}\n);`
       );
-      for (const c of chunks) await insertBatch(() => new sql.Request(tx), stage, spec, c, stats);
+      for (const c of chunks) await insertBatch(() => work.request(tx), stage, spec, c, stats);
 
       // 已經在表裡的（同鑰匙或同內容）不會被寫，也不會被更新
-      const r = await new sql.Request(tx).query(appendSql(spec, full, stage));
+      const r = await work.request(tx).query(appendSql(spec, full, stage));
       stats.written = Number((r.recordset || [])[0]?.n) || 0;
+      work.checkpoint();
       await tx.commit();
     } catch (e) {
       await tx.rollback().catch(() => {});
@@ -687,8 +691,7 @@ async function main() {
     for (const spec of [VITALS_SPEC, NEURO_SPEC]) {
       const { full } = tableOf(spec, settings);
       const timeCol = timeKeyOf(spec);
-      const r = await pool
-        .request()
+      const r = await work.request(pool)
         .query(
           `IF OBJECT_ID(N'${full}', N'U') IS NULL SELECT 0 AS ok, 0 AS n, NULL AS newest
            ELSE SELECT 1 AS ok, COUNT(*) AS n, MAX([${timeCol}]) AS newest FROM ${full} WITH (NOLOCK);`

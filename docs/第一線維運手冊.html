@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICCA 資料擷取服務｜第一線維運手冊</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --ink:#14202b; --muted:#587080; --line:#d9e1e8; --blue:#1269a4; --orange:#9a5b14; --red:#a22a2a; --code:#17232d; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI","Microsoft JhengHei",sans-serif; }
+  main { max-width:1000px; margin:auto; padding:48px 24px 80px; } header { border-left:6px solid var(--blue); padding:8px 24px; margin-bottom:32px; }
+  h1 { margin:0; font-size:clamp(28px,5vw,42px); } h2 { margin:42px 0 14px; font-size:25px; } h3 { margin:0 0 8px; font-size:19px; } p { margin:8px 0 14px; }
+  .muted { color:var(--muted); } .tag { display:inline-block; border-radius:999px; padding:2px 9px; font:700 12px ui-monospace,Consolas,monospace; color:#075d45; background:#dff5ed; }
+  .card, .notice { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px 22px; margin:14px 0; box-shadow:0 1px 3px #14202b0b; }
+  .notice { border-left:4px solid var(--orange); background:#fff8ed; } .danger { border-left-color:var(--red); background:#fff3f3; }
+  code,pre { font-family:ui-monospace,"Cascadia Mono",Consolas,monospace; } code { color:#9e371f; } pre { overflow:auto; margin:12px 0; padding:16px; border-radius:9px; background:var(--code); color:#eaf2f8; line-height:1.55; } pre code { color:inherit; }
+  ol,ul { padding-left:24px; } li { margin:6px 0; } table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); } th,td { text-align:left; padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:top; } th { background:#eaf1f6; } tr:last-child td { border-bottom:0; }
+  @media (prefers-color-scheme:dark) { :root { --bg:#101820; --card:#17222c; --ink:#e5edf3; --muted:#aac0ce; --line:#30414e; --blue:#70b7e8; --orange:#efb66d; --red:#fb8c8c; --code:#0c1319; } th { background:#20303c; } .notice { background:#332919; } .danger { background:#3b2020; } code { color:#ffa991; } }
+  @media print { body { background:#fff; } main { max-width:none; padding:18px; } .card,.notice { box-shadow:none; break-inside:avoid; } h2 { break-after:avoid; } }
+</style>
+</head>
+<body>
+<main>
+  <header><span class="tag">第一線支援用</span><h1>ICCA 資料擷取服務</h1><p class="muted">第一線維運手冊｜不需要程式背景</p></header>
+
+  <div class="notice danger"><strong>請勿修改程式碼或設定檔。</strong>除非維護人員指示，請不要修改 <code>databases.config.json</code>、<code>sink.config.json</code>，也不要刪除 <code>.sink-state.json</code>。</div>
+
+  <section><h2>正常情況</h2><ul><li><code>http://127.0.0.1:8770/health</code> 可開啟，且有 <code>"status":"ok"</code>。</li><li><code>checks</code> 裡 vitals 與 neuro 都是 <code>"status": "ok"</code>，<code>reasons</code> 是空的。</li><li><code>lastWrite</code> 中 vitals 與 neuro 的最後成功時間持續更新。</li><li>中介資料庫資料時間通常不落後目前時間超過兩到三個排程間隔（一般為 5 分鐘）。</li></ul></section>
+
+  <section><h2>每日檢查（約 1 分鐘）</h2><ol><li>在<strong>服務主機</strong>開啟瀏覽器，輸入：<pre><code>http://127.0.0.1:8770/health?pretty=1</code></pre></li><li>確認最上方為 <code>"status": "ok"</code>。<ul><li><code>"starting"</code>：服務剛啟動、還沒寫第一輪，等 5 分鐘再看一次。</li><li><code>"degraded"</code>（網頁可能顯示錯誤或 503）：依下方「資料沒有更新」處理。</li></ul></li><li>查看 <code>checks</code> 與 <code>lastWrite</code>。若 vitals 或 neuro 顯示失敗、時間很久以前，依下方處理。</li></ol></section>
+
+  <section><h2>常見問題處理</h2>
+    <article class="card"><h3>服務無法開啟／health 網址連不上</h3><ol><li>確認是在服務主機上開啟網址，且網址是 <code>127.0.0.1:8770</code>。</li><li>以系統管理員身分開啟 CMD，執行：<pre><code>nssm status ICCA-Server</code></pre></li><li>若不是 <code>SERVICE_RUNNING</code>，執行一次：<pre><code>nssm restart ICCA-Server</code></pre></li><li>等待 1 分鐘後再次開啟 health 網址。</li><li>仍失敗時，截圖並收集錯誤 log；不要反覆重啟。</li></ol></article>
+    <article class="card"><h3>health 顯示 degraded，或資料沒有更新</h3><ol><li>重新整理 health 網址，記下異常類型：<code>vitals</code> 或 <code>neuro</code>。</li><li>看該類 <code>checks</code> 裡的 <code>reasons</code>：<ul><li><code>write_failed</code>：寫入失敗，看 <code>failedSources</code> 是哪個來源。</li><li><code>stale</code>：太久沒有新資料進來。</li><li><code>no_success</code>：從開機到現在一次都沒成功，多半是排程沒跑或設定有問題。</li><li><code>gap_beyond_backfill</code>：缺口已經太大，補撈補不回來，直接回報維護人員。</li></ul></li><li>查看 <code>lastWrite</code> 裡的 <code>lastError</code>、<code>failedSources</code> 或錯誤文字。</li><li>可安全重啟服務一次：<pre><code>nssm restart ICCA-Server</code></pre></li><li>等待 5～10 分鐘後再查看 health。</li><li>仍未更新時交由資訊室／DBA／程式維護人員。不要自行大量補撈資料。</li></ol></article>
+    <article class="card"><h3>Log 出現紅字、✗、500、502、503 或 504</h3><ul><li><code>fetch</code>：常見為來源資料庫、權限、網路或查詢問題，聯絡資料庫／網路管理人員。</li><li><code>sink</code>：資料已撈到但不能寫入中介資料庫，聯絡中介資料庫 DBA。</li><li><code>group</code>：資料對應異常，交給程式維護人員。</li><li><code>500</code>／<code>502</code>：截圖完整錯誤文字；可重啟一次，持續出現就停止重試並回報。</li><li><code>503</code>（工作忙碌／排隊逾時）：上一輪還沒跑完。等 30 秒以上再看，偶爾出現是正常的；一直出現才回報。<strong>不要連續重送</strong>。</li><li><code>504</code>（整輪執行逾時）：這一輪被中止，但可能已經寫進一部分資料。<strong>不要立刻自行補撈</strong>，先看 health 再交給維護人員。</li></ul></article>
+    <article class="card"><h3>Node.js 記憶體偏高</h3><p>約 100～200 MB 通常正常。請看趨勢：整天大致穩定即正常；若每輪都明顯增加、持續達數百 MB 或數 GB，截圖工作管理員，重啟一次後回報維護人員。</p></article>
+  </section>
+
+  <section><h2>如何查看 log</h2><p>若服務以 NSSM 安裝，預設位置：</p><pre><code>logs\server.out.log
+logs\server.err.log</code></pre><p>優先看最新幾行，記下發生時間、錯誤文字、vitals/neuro 與來源名稱。不要直接寄出完整 log，內容可能含內部主機名稱或病人相關資訊。</p></section>
+
+  <section><h2>可做與不可做</h2><table><thead><tr><th>可以做</th><th>不要做</th></tr></thead><tbody><tr><td>查看 health、log、Windows 工作管理員</td><td>修改資料庫密碼、連線位址或 SQL 檔</td></tr><tr><td>確認異常後重啟服務一次</td><td>反覆重啟、連續重送忙碌（503）的請求，或同時開多個 <code>node server.js</code></td></tr><tr><td>擷取錯誤畫面並回報</td><td>刪除 <code>.sink-state.json</code> 或中介資料表</td></tr><tr><td>記錄異常開始與恢復時間</td><td>在正式環境執行大範圍補撈</td></tr></tbody></table></section>
+
+  <section><h2>交接給第二線時，請提供</h2><ol><li>問題開始、發現與恢復時間。</li><li>health 畫面／內容（含 <code>status</code> 與 <code>checks</code>，遮蔽病人資訊）。</li><li><code>nssm status ICCA-Server</code> 的結果。</li><li>最近一次重啟時間，以及是否改善。</li><li><code>server.err.log</code> 最新錯誤的時間與完整訊息。</li><li>影響範圍：vitals、neuro，或特定來源／病房。</li></ol></section>
+
+  <section><h2>維護人員提醒</h2><ul><li>修改設定檔後，必須執行 <code>nssm restart ICCA-Server</code> 才會重新讀取。</li><li>密碼應以 <code>env:環境變數名稱</code> 管理，請勿放在設定檔明文或截圖中。</li><li>需補資料時，先確認 health 回傳的建議範圍，再由熟悉資料庫的人員執行。</li></ul></section>
+</main>
+</body>
+</html>

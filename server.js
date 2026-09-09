@@ -15,6 +15,7 @@
  *
  * 端點（皆為 GET）：
  *   /health                 探活，不碰資料庫（含各資料最後一次成功寫入的時間）
+ *                           寫入過期或失敗時回 503 degraded，判定見 health.js
  *   /icca/head              目前寫入頭是哪一張表
  *   /icca/order             26 張表由新到舊的順序與各表狀態
  *   /icca/latest            從 head 跨表撈最新 N 筆（原始列，ring.js）
@@ -53,6 +54,8 @@ const ring = require('./ring.js');
 const vitals = require('./vitals.js');
 const neuro = require('./neuro.js');
 const sink = require('./sink.js');
+const work = require('./work-limits.js');
+const { evaluateHealth } = require('./health.js');
 const state = require('./state.js'); // 記錄每一種資料最後一次成功寫入的時間
 
 // vitals / neuro 原本是「跑一次就結束」的命令列工具，連完就把池關掉。
@@ -85,6 +88,17 @@ function resolveSecret(value) {
 const CFG = readJson(CONFIG_PATH);
 const SRV = CFG.server || {};
 const TOKEN = process.env.ICCA_TOKEN || SRV.token || null;
+// Access log is useful while integrating an HTTP client, but can become very
+// noisy for frequent polling.  Keep errors regardless of this setting.
+const ACCESS_LOG = SRV.accessLog !== false;
+const maxQueuedRequests = typeof SRV.maxQueuedRequests === 'string'
+  ? SRV.maxQueuedRequests.trim() : SRV.maxQueuedRequests;
+const workLimits = new work.WorkLimits({
+  maxQueued: maxQueuedRequests === 0 || maxQueuedRequests === '0'
+    ? 0 : positiveSetting(maxQueuedRequests, 2, 100),
+  queueTimeoutMs: positiveSetting(SRV.queueTimeoutMs, 30000, 600000),
+  jobTimeoutMs: positiveSetting(SRV.jobTimeoutMs, 180000, 3600000),
+});
 const SINK = sink.mergeSettings(CFG);
 const SINK_ON = sink.wanted(SINK);
 
@@ -294,37 +308,26 @@ async function epAt(ctx, q) {
 // ---------- vitals / neuro ----------
 // 這兩支各自管自己的設定與連線（都在 vitals.js 的池裡），不需要 ring 的 ctx。
 
-// 同一個端點被重複觸發時排隊跑：兩輪同時跑會互相蓋掉表號錨點檔與病人快取，
-// 而且對 DB 的壓力憑空翻倍。Rhapsody 若因為逾時重送，第二個請求會等第一個跑完。
-const chains = new Map();
-function serialize(key, fn) {
-  const prev = chains.get(key) || Promise.resolve();
-  const next = prev.then(fn, fn); // 前一輪失敗也照跑
-  chains.set(key, next.catch(() => {})); // 鏈上只留成功/失敗的時間點，不留 rejection
-  return next;
-}
-
+// HTTP 與內建排程在入口共用 workLimits；名額涵蓋撈取、寫入與取消清理。
 // 查詢參數對應 vitals.js 的命令列旗標，語意完全一樣：
 //   window(w) 時間窗分鐘、site 只跑哪幾站、param 指定 parameterId、discover 從 primary 查、
 //   utc 不換算時區、noPatients 不查病歷號、keepUnmatched 保留沒對到病人的床、
 //   allRows 不降頻、noAperiodic 不撈 NBP、withSummary 包成 { summary, rows }
 async function epVitals(_ctx, q) {
   const window = boundedInt(q.window != null ? q.window : q.w, 'window', API_LIMITS.vitalsWindowMinutes);
-  const res = await serialize('vitals', () =>
-    vitals.collect({
-      config: CONFIG_PATH,
-      window,
-      site: q.site || null,
-      param: q.param != null ? q.param : null,
-      discover: truthy(q.discover),
-      utc: truthy(q.utc),
-      noPatients: truthy(q.noPatients),
-      keepUnmatched: truthy(q.keepUnmatched),
-      allRows: truthy(q.allRows),
-      noAperiodic: truthy(q.noAperiodic),
-      patientDb: q.patientsDb || null,
-    })
-  );
+  const res = await vitals.collect({
+    config: CONFIG_PATH,
+    window,
+    site: q.site || null,
+    param: q.param != null ? q.param : null,
+    discover: truthy(q.discover),
+    utc: truthy(q.utc),
+    noPatients: truthy(q.noPatients),
+    keepUnmatched: truthy(q.keepUnmatched),
+    allRows: truthy(q.allRows),
+    noAperiodic: truthy(q.noAperiodic),
+    patientDb: q.patientsDb || null,
+  });
   // 全部站台都失敗時一定要回錯誤：空陣列配 200 會讓 Rhapsody 當成「這次沒有資料」，
   // 一路往下送到下游，等有人發現時已經斷了好幾個小時。這對應 CLI 的 exitCode=1。
   failIfAllDown(res.failures, res.sites.length, res.summary, (s) => s.site);
@@ -338,14 +341,12 @@ async function epVitals(_ctx, q) {
 //   window(w) 時間窗分鐘（不給就用 neuro.js 的預設 6）、utc 不換算時區、withSummary 包成 { summary, rows }
 async function epNeuro(_ctx, q) {
   const window = boundedInt(q.window != null ? q.window : q.w, 'window', API_LIMITS.neuroWindowMinutes);
-  const res = await serialize('neuro', () =>
-    neuro.collect({
-      config: CONFIG_PATH,
-      window,
-      utc: truthy(q.utc),
-      primaryDb: q.primaryDb || null,
-    })
-  );
+  const res = await neuro.collect({
+    config: CONFIG_PATH,
+    window,
+    utc: truthy(q.utc),
+    primaryDb: q.primaryDb || null,
+  });
   failIfAllDown(res.failures, res.groups, res.summary, (s) => s.db);
 
   return truthy(q.withSummary) || res.settings.includeSummary === true
@@ -379,6 +380,7 @@ function pushWindow(kind, q) {
 async function writeBySource(kind, sources, { nameOf, rowsOf, write, startedAtMs }) {
   const writes = [];
   for (const source of sources) {
+    work.checkpoint();
     const name = nameOf(source);
     if (!source.ok) {
       state.recordSourceFailure(kind, name, source.error);
@@ -395,6 +397,7 @@ async function writeBySource(kind, sources, { nameOf, rowsOf, write, startedAtMs
     }
     try {
       const stats = await write(rows);
+      work.checkpoint();
       state.recordSourceSuccess(kind, name, { startedAtMs, stats });
       writes.push({ source: name, ok: true, ...stats });
     } catch (e) {
@@ -434,9 +437,8 @@ async function pushVitals(q = {}) {
   // 開始撈的時間就是「補的時候要從這裡開始」的那個點，先記下來（見 state.js）
   const startedAtMs = Date.now();
   try {
-    const res = await serialize('vitals', () =>
-      vitals.collect({ config: CONFIG_PATH, window: pushWindow('vitals', q), site: q.site || null })
-    );
+    const res = await vitals.collect({ config: CONFIG_PATH, window: pushWindow('vitals', q), site: q.site || null });
+    work.checkpoint();
     failIfAllDown(res.failures, res.sites.length, res.summary, (s) => s.site);
     const writes = await writeBySource('vitals', res.summary, {
       startedAtMs,
@@ -458,9 +460,8 @@ async function pushNeuro(q = {}) {
   if (!SINK_ON) throw httpError(400, '設定檔沒有啟用 sink（databases.config.json 的 "sink" 區塊，enabled: true）');
   const startedAtMs = Date.now();
   try {
-    const res = await serialize('neuro', () =>
-      neuro.collect({ config: CONFIG_PATH, window: pushWindow('neuro', q) })
-    );
+    const res = await neuro.collect({ config: CONFIG_PATH, window: pushWindow('neuro', q) });
+    work.checkpoint();
     failIfAllDown(res.failures, res.groups, res.summary, (s) => s.db);
     const writes = await writeBySource('neuro', res.summary, {
       startedAtMs,
@@ -482,8 +483,7 @@ async function pushNeuro(q = {}) {
  *   "schedule": { "vitalsMinutes": 5, "neuroMinutes": 5 }（sink.config.json）
  * 這樣連外部排程器都不必——Node 常駐、連線池溫熱，時間到就撈一輪寫進去。
  *
- * 上一輪還沒跑完就跳過這一輪，不排隊：排隊只會越積越多，而且下一輪本來就會
- * 把漏掉的時間窗一起帶到（窗開得比間隔大）。
+ * 同類工作仍在執行或取消清理時跳過，不排隊；漏掉的區間仍需人工確認與補撈。
  */
 function startSchedule() {
   const sc = SINK.schedule;
@@ -494,13 +494,17 @@ function startSchedule() {
   ].filter((j) => Number(j.minutes) > 0);
 
   return jobs.map((j) => {
-    let busy = false;
     const tick = async () => {
-      if (busy) return console.warn(`${new Date().toISOString()} ⚠ 上一輪 ${j.name} 還沒結束，這一輪跳過`);
-      busy = true;
+      // 槽位在 504 回傳後仍可能正在取消／回滾，不能用另一個 busy 旗標判斷。
+      if (workLimits.isBusy(j.name)) {
+        return console.warn(`${new Date().toISOString()} [排程 ${j.name}] ⚠ 同類工作執行或收尾中，這一輪跳過`);
+      }
       const started = Date.now();
       try {
-        const stats = await j.run();
+        const stats = await workLimits.run(j.name, () => j.run(), {
+          noQueue: true,
+          onTimeout: (e) => state.recordFailure(j.name, e.message),
+        });
         // 部分來源失敗仍算這一輪成功（其他站的資料有進去），但 log 要看得見是誰沒進去
         const failed = (stats.sources || []).filter((s) => !s.ok);
         const tail = failed.length
@@ -509,8 +513,6 @@ function startSchedule() {
         console.log(`${new Date().toISOString()} [排程 ${j.name}] ${sink.describe(stats)}${tail}`);
       } catch (e) {
         console.error(`${new Date().toISOString()} [排程 ${j.name}] ✗ ${e.message}（${Date.now() - started}ms）`);
-      } finally {
-        busy = false;
       }
     };
     const timer = setInterval(tick, j.minutes * 60000);
@@ -599,6 +601,7 @@ function safeSearch(u) {
   return s ? `?${s}` : '';
 }
 function send(res, status, obj, pretty) {
+  if (res.destroyed || res.writableEnded) return;
   const body = pretty ? JSON.stringify(obj, null, 2) : JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(body);
@@ -625,13 +628,21 @@ const server = http.createServer(async (req, res) => {
   // lastWrite 是從狀態檔讀的（不連 DB），發現問題時第一個看這裡：
   // 上次成功幾點、離現在多久、要補的話該下多大的 --window
   if (u.pathname === '/health') {
-    return send(res, 200, {
-      status: 'ok',
-      uptimeSec: Math.round(process.uptime()),
+    const uptimeSec = process.uptime();
+    const lastWrite = SINK_ON ? stateReport() : null;
+    const health = evaluateHealth({
+      sinkOn: SINK_ON, schedule: SINK.schedule || {}, settings: SRV.health || {},
+      lastWrite, uptimeSec,
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    return send(res, health.httpStatus, {
+      status: health.status,
+      checks: health.checks,
+      uptimeSec: Math.round(uptimeSec),
       pools: [...pools.keys()],
       config: CONFIG_PATH,
       stateFile: SINK_ON ? state.filePath() : null,
-      lastWrite: SINK_ON ? stateReport() : null,
+      lastWrite,
     }, pretty);
   }
 
@@ -644,17 +655,36 @@ const server = http.createServer(async (req, res) => {
   const route = ROUTES[u.pathname];
   if (!route) return send(res, 404, { error: 'not found', paths: Object.keys(ROUTES).concat('/health') }, pretty);
 
+  const disconnected = new AbortController();
+  const onClose = () => disconnected.abort(httpError(499, '呼叫端已斷線'));
+  res.once('close', onClose);
+  let key = u.pathname.endsWith('/vitals') ? 'vitals' : 'neuro';
   try {
-    const ctx = route.ring ? await getContext(q.site) : null;
-    const out = await route.fn(ctx, q);
+    if (route.ring) {
+      // 與連線池採同一個站台身分，避免預設站、大小寫與任意 site 另開名額。
+      const resolved = ring.resolveConfig(CFG, q.site);
+      key = `ring:${(resolved.source && resolved.source.name) || '__single__'}`;
+    }
+    const out = await workLimits.run(key, async () => {
+      const ctx = route.ring ? await getContext(q.site) : null;
+      work.checkpoint();
+      return route.fn(ctx, q);
+    }, {
+      signal: disconnected.signal,
+      onTimeout: u.pathname.startsWith('/icca/push/')
+        ? (e) => state.recordFailure(key, e.message) : undefined,
+    });
     const ms = Date.now() - started;
-    console.log(`${new Date().toISOString()} ${req.method} ${u.pathname}${safeSearch(u)} -> 200 ${ms}ms`);
+    if (ACCESS_LOG) console.log(`${new Date().toISOString()} ${req.method} ${u.pathname}${safeSearch(u)} -> 200 ${ms}ms`);
     return send(res, 200, out, pretty);
   } catch (err) {
     const status = err.status || 500;
     const ms = Date.now() - started;
     console.error(`${new Date().toISOString()} ${req.method} ${u.pathname}${safeSearch(u)} -> ${status} ${ms}ms：${err.message}`);
+    if (status === 503 && !res.destroyed) res.setHeader('Retry-After', '30');
     return send(res, status, { error: err.message }, pretty);
+  } finally {
+    res.removeListener('close', onClose);
   }
 });
 
