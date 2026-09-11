@@ -6,7 +6,7 @@
  * 供 neuro.js 使用：interventionId 當 PtIntervention 的過濾條件，terseLabel 會原名
  * 併進輸出的每一筆，下游靠它區分是哪一種紀錄。等同 vitals.js 的 --discover。
  *
- * 目前 14 個 SELECT 區塊（編號到 13，組別 11 有兩塊），共 39 個 terseLabel。
+ * 目前 16 個 SELECT 區塊（編號到 15，組別 11 有兩塊），共 41 個 terseLabel。
  * 每組的差別只在「terseLabel 清單 + FSSection + Document」三者，其餘 join／篩選
  * 邏輯完全相同，所以用 UNION 併起來。要再加一種，照樣複製一個 SELECT 區塊、
  * 換掉這三個條件即可：
@@ -27,8 +27,10 @@
  *   11    Fluid removed-weight loss(mL/hr)       Setting                 CRRT紀錄 (Infomed)
  *   12    Pump Speed/Blood Flow/FiO2… 共 6 項     （不指定區段）           體外維生系統及生命徵象紀錄
  *   13    TCP rate/TCP output/Sensitivity        TPM/TCP                 生命徵象及治療紀錄
+ *   14    IABP: Trigger mode                     IABP                    生命徵象及治療紀錄
+ *   15    Flow                                   Impella                 生命徵象及治療紀錄
  *
- * 組別 5~13 不是神經評估，是後來陸續加的。體溫原本走 vitals.js 的 parameter-ids.txt
+ * 組別 5~15 不是神經評估，是後來陸續加的。體溫原本走 vitals.js 的 parameter-ids.txt
  * （儀器資料），改由這裡的圖表資料出，所以那份清單裡的體溫 parameterId 已移除。
  *
  * EXISTS 那段用 conceptId 把 intervention 綁回它實際出現的表單區段，避免撈到同名但
@@ -463,4 +465,62 @@ WHERE
       WHERE d.displayLabel IN (N'生命徵象及治療紀錄')
         AND ar.conceptId   = i.conceptId
   )
-  ORDER BY terseLabel;
+UNION
+
+-- 組別 14：IABP
+SELECT DISTINCT
+     i.interventionId
+    ,i.terseLabel
+FROM dbo.Intervention i WITH (NOLOCK)
+JOIN dbo.InterventionItem WITH (NOLOCK)
+       ON i.interventionId = InterventionItem.interventionId
+      AND InterventionItem.isPrimary = 1
+WHERE
+      i.isPrimary = 1
+  AND i.terseLabel IN (N'IABP: Trigger mode')
+  AND EXISTS (
+      SELECT 1
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.displayLabel    = N'IABP'
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel IN (N'生命徵象及治療紀錄')
+        AND ar.conceptId   = i.conceptId
+  )
+
+UNION
+
+-- 組別 15：Impella
+SELECT DISTINCT
+     i.interventionId
+    ,i.terseLabel
+FROM dbo.Intervention i WITH (NOLOCK)
+JOIN dbo.InterventionItem WITH (NOLOCK)
+       ON i.interventionId = InterventionItem.interventionId
+      AND InterventionItem.isPrimary = 1
+WHERE
+      i.isPrimary = 1
+  AND i.terseLabel IN (N'Flow')
+  AND EXISTS (
+      SELECT 1
+      FROM dbo.Document      d  WITH (NOLOCK)
+      JOIN dbo.FSSection     fs WITH (NOLOCK) ON fs.documentId      = d.documentId
+                                             AND fs.displayLabel    = N'Impella'
+                                             AND fs.isPrimary       = 1
+      JOIN dbo.FSAllowedSlot sl WITH (NOLOCK) ON sl.fsSectionId     = fs.fsSectionId
+                                             AND sl.isPrimary       = 1
+      JOIN dbo.FSSlotRow     sr WITH (NOLOCK) ON sr.fsAllowedSlotId = sl.fsAllowedSlotId
+                                             AND sr.isPrimary       = 1
+      JOIN dbo.FSAllowedRow  ar WITH (NOLOCK) ON ar.fsAllowedRowId  = sr.fsAllowedRowId
+                                             AND ar.isPrimary       = 1
+      WHERE d.displayLabel IN (N'生命徵象及治療紀錄')
+        AND ar.conceptId   = i.conceptId
+  )
+
+ORDER BY terseLabel;
