@@ -624,11 +624,32 @@ charting 分片的連線沿用 primary 的帳密與 `options`，只換 `server` 
 node neuro.js --pretty            # 撈近 6 分鐘有異動的
 node neuro.js -w 120              # 改抓近 120 分鐘
 node neuro.js --utc               # 時間保留 DB 原始的 UTC（預設已 +8）
+node neuro.js --export-ids sql/neuro-intervention-ids.json  # 只更新 interventionId JSON 清單
 node neuro.js --ids-file my.txt   # 用自己的 interventionId 清單，跳過第 1 段查詢
 node neuro.js --primary-db CISPrimaryDB   # 指定 primary 是哪個資料庫
 node neuro.js --dry-run           # 只檢查設定，不連資料庫
 node neuro.js --help              # 全部選項
 ```
+
+### 固定 interventionId 清單
+
+若表單設定不常變，可先執行一次：
+
+```bash
+node neuro.js --export-ids sql/neuro-intervention-ids.json
+```
+
+它只在 primary 跑第 1 段 interventionId 發現查詢（也會確認在床病人 SQL 能在同一個
+primary 執行），不查 charting 分片、不寫 sink。接著在 `databases.config.json` 的
+`neuro` 區塊設定：
+
+```json
+"interventionIdsFile": "sql/neuro-intervention-ids.json"
+```
+
+之後不論是 `node neuro.js` 或 `server.js` 的排程／neuro 端點，都會讀這份 JSON，跳過
+`sql/neuro-interventions.sql`；在床病人與 charting 資料仍照常查。修改 discovery SQL 或表單
+設定後，重新執行一次 `--export-ids` 即可更新清單。命令列的 `--ids-file` 優先於設定檔。
 
 ## 輸出
 
@@ -677,6 +698,7 @@ node neuro.js --help              # 全部選項
   "neuro": {
     "windowMinutes": 60,
     "output": "neuro_{ts}.json",
+    "interventionIdsFile": "sql/neuro-intervention-ids.json",
     "encounterChunk": 1000,
     "orderSqlFile": "sql/orders.sql"
   }

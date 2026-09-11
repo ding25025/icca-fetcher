@@ -41,6 +41,8 @@ const work = require('./work-limits.js');
  * 用法：
  *   node neuro.js                 使用 databases.config.json，撈近 6 分鐘
  *   node neuro.js --window 120    改抓近 120 分鐘
+ *   node neuro.js --export-ids sql/neuro-intervention-ids.json
+ *                                  只更新 interventionId JSON 清單
  *   node neuro.js --ids-file <檔> 用自己的 interventionId 清單，不跑 Query 1
  *   node neuro.js --utc           時間保留 UTC（預設已 +8）
  *   node neuro.js --dry-run       只檢查設定，不連資料庫
@@ -66,6 +68,7 @@ function parseArgs(argv) {
     else if (t === '--pretty' || t === '-p') a.pretty = true;
     else if (t === '--window' || t === '-w') a.window = Number(argv[++i]);
     else if (t === '--ids-file' || t === '--ids') a.idsFile = argv[++i];
+    else if (t === '--export-ids') a.exportIds = argv[++i];
     else if (t === '--primary-db') a.primaryDb = argv[++i];
     else if (t === '--utc') a.utc = true;
     else if (t === '--dry-run' || t === '-n') a.dryRun = true;
@@ -90,6 +93,8 @@ function printHelp() {
   -w, --window <分鐘>   撈 storeTime 落在最近幾分鐘的（預設 6＝5 分鐘一輪多留 1 分鐘）
       --ids-file <檔>   用自己的 interventionId 清單（GUID，逗號/換行分隔，可帶標籤），
                         指定後就不跑 sql/neuro-interventions.sql
+      --export-ids <檔> 只跑 primary 的 interventionId 發現查詢，輸出可供 --ids-file
+                         或 neuro.interventionIdsFile 使用的 JSON；不查 charting、不寫 sink
       --primary-db <名> primary 要連哪個資料庫（預設讀 SQL 裡的 USE，再試 CISPrimaryDB）
       --utc             時間保留 DB 原始的 UTC 值（預設已換算成本地 +8）
       --to-db           撈完直接寫進中介資料庫（設定檔的 sink 區塊），不落 JSON 檔
@@ -119,6 +124,8 @@ const DEFAULTS = {
   timesInUtc: false,
   displayTimezoneOffsetHours: 8,
   interventionSqlFile: 'sql/neuro-interventions.sql',
+  // 設定後每輪從這個 JSON／文字 GUID 清單讀 interventionId，不再跑 interventionSqlFile。
+  interventionIdsFile: null,
   encountersSqlFile: 'sql/neuro-encounters.sql',
   // 藥物醫囑（鎮靜／止痛／肌肉鬆弛／升壓）。沒有開關，每一輪都跟表單紀錄一起撈。
   orderSqlFile: 'sql/orders.sql',
@@ -174,42 +181,89 @@ function buildChartingConn(template, dbSqlInstance, dbName) {
 const GUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
 const upper = (g) => String(g).trim().toUpperCase();
 
+/** 將一個 GUID 加進清單；已出現的 ID 不重複計算。 */
+function addInterventionId(out, value, label = null) {
+  const match = String(value == null ? '' : value).match(GUID_RE);
+  if (!match) return false;
+  const id = match[0];
+  const key = upper(id);
+  if (out.labels[key] !== undefined) return false;
+  out.ids.push(id);
+  out.labels[key] = label != null && String(label).trim() ? String(label).trim() : null;
+  return true;
+}
+
 /** 把 Query 1 回來的列變成 { ids:[原字串GUID], labels:{大寫GUID: terseLabel} } */
 function indexInterventions(rows) {
   const out = { ids: [], labels: {} };
-  for (const r of rows || []) {
-    const id = r.interventionId;
-    if (!id) continue;
-    const key = upper(id);
-    if (!out.labels[key]) {
-      out.ids.push(String(id).trim());
-      out.labels[key] = r.terseLabel != null ? String(r.terseLabel).trim() : null;
-    }
-  }
+  for (const r of rows || []) addInterventionId(out, r && r.interventionId, r && r.terseLabel);
   return out;
 }
 
+/** 將目前的 ID／標籤對照轉成可供下次直接讀取的 JSON 格式。 */
+function interventionIdsJson(interventions, primaryDatabase) {
+  const labels = (interventions && interventions.labels) || {};
+  const rows = (interventions && interventions.ids || []).map((id) => ({
+    interventionId: id,
+    terseLabel: labels[upper(id)] || null,
+  }));
+  return {
+    generatedAt: new Date().toISOString(),
+    primaryDatabase,
+    count: rows.length,
+    interventions: rows,
+  };
+}
+
 /**
- * --ids-file：吃自己撈出來的 interventionId。每行一個 GUID，後面可接標籤，
- * 例如「C7A13D3D-... , 昏迷指數」或純 GUID。逗號 / Tab / 直線 / 空白都當分隔。
+ * --ids-file：吃自己撈出來的 interventionId。可用 --export-ids 產出的 JSON，
+ * 或每行一個 GUID（後面可接標籤）；逗號 / Tab / 直線 / 空白都當分隔。
  */
 function loadIdsFile(file) {
   const abs = path.resolve(process.cwd(), file);
   if (!fs.existsSync(abs)) throw new Error(`找不到 interventionId 檔：${abs}`);
   const out = { ids: [], labels: {} };
   const text = fs.readFileSync(abs, 'utf8').replace(/^﻿/, '');
-  for (const line of text.split(/\r?\n/)) {
-    const l = line.trim();
-    if (!l || l.startsWith('--') || l.startsWith('#')) continue;
-    const m = l.match(GUID_RE);
-    if (!m) continue;
-    const id = m[0];
-    const key = upper(id);
-    if (out.labels[key] !== undefined) continue;
-    // GUID 以外、去掉分隔字元後剩下的當標籤
-    const label = l.replace(id, '').replace(/[,\t|]+/g, ' ').trim() || null;
-    out.ids.push(id);
-    out.labels[key] = label;
+
+  // --export-ids 產出的 JSON 為 { interventions: [{ interventionId, terseLabel }] }。
+  // 也接受直接的陣列，方便使用者自行維護清單。是 JSON 就只認列資料，
+  // 不再逐行掃文字，免得標籤裡出現的 GUID 被當成另一個 ID。
+  let parsed;
+  let isJson = false;
+  try {
+    parsed = JSON.parse(text);
+    isJson = true;
+  } catch (_) {
+    // 不是 JSON 時沿用既有的逐行 GUID 格式。
+  }
+
+  if (isJson) {
+    const rows = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed && parsed.interventions)
+        ? parsed.interventions
+        : Array.isArray(parsed && parsed.interventionIds)
+          ? parsed.interventionIds
+          : null;
+    if (!rows) throw new Error(`${abs} 是 JSON，但找不到 interventions 陣列（或整份就是陣列）`);
+    for (const row of rows) {
+      if (typeof row === 'string') addInterventionId(out, row);
+      else if (row && typeof row === 'object') {
+        addInterventionId(out, row.interventionId != null ? row.interventionId : row.id,
+          row.terseLabel != null ? row.terseLabel : row.label);
+      }
+    }
+  } else {
+    for (const line of text.split(/\r?\n/)) {
+      const l = line.trim();
+      if (!l || l.startsWith('--') || l.startsWith('#')) continue;
+      const m = l.match(GUID_RE);
+      if (!m) continue;
+      const id = m[0];
+      // GUID 以外、去掉分隔字元後剩下的當標籤
+      const label = l.replace(id, '').replace(/[,\t|]+/g, ' ').trim() || null;
+      addInterventionId(out, id, label);
+    }
   }
   if (!out.ids.length) throw new Error(`${abs} 裡沒有解析到任何 interventionId（GUID）`);
   return out;
@@ -382,6 +436,30 @@ async function runPrimary(primary, candidates, { intSql, encSql, wantInterventio
   return { database: null, errors };
 }
 
+function primaryFailure(pr) {
+  const err = new Error(
+    `primary 查詢失敗，候選資料庫都不通：` +
+    pr.errors.map((e) => `\n    ${e.database}：${e.message}`).join('')
+  );
+  err.hint =
+    '若錯誤是「無效的物件名稱 dbo.PtLocationStay」，表示連錯資料庫，\n' +
+    '  在 SQL 檔開頭寫 USE <資料庫> 或用 --primary-db <資料庫>。';
+  return err;
+}
+
+/** 只跑 primary 的清單發現，用來產生可重複使用的 interventionId JSON。 */
+async function discoverInterventions(prep) {
+  if (!prep.intSql) throw new Error('目前使用 interventionIdsFile，無法再從 SQL 匯出；請暫時移除該設定或指定另一份設定檔');
+  const pr = await runPrimary(
+    prep.primary,
+    prep.candidates,
+    { intSql: prep.intSql, encSql: prep.encSql, wantInterventions: true },
+    prep.timeout
+  );
+  if (!pr.database) throw primaryFailure(pr);
+  return { primaryDatabase: pr.database, interventions: pr.interventions };
+}
+
 // ---------- 單一 charting 分片 ----------
 async function runGroup(group, { interventionIds, orderSql, windowMinutes, template, settings, timeout }) {
   const { dbSqlInstance, dbName, encounterIds } = group;
@@ -433,14 +511,15 @@ function prepare(args) {
   if (!fs.existsSync(encAbs)) throw new Error(`找不到在床病人 SQL：${encAbs}`);
   const encSql = fs.readFileSync(encAbs, 'utf8');
 
-  // interventionId 來源：--ids-file 優先，否則跑 Query 1
+  // interventionId 來源：命令列優先，其次設定檔；--export-ids 時強制改跑 Query 1。
+  const idsFile = args.exportIds ? null : (args.idsFile || settings.interventionIdsFile || null);
   let idsFromFile = null;
-  if (args.idsFile) {
-    idsFromFile = loadIdsFile(args.idsFile);
+  if (idsFile) {
+    idsFromFile = loadIdsFile(idsFile);
   } else if (!fs.existsSync(intAbs)) {
     throw new Error(`找不到 interventionId SQL：${intAbs}（或用 --ids-file 指定清單）`);
   }
-  const intSql = args.idsFile ? '' : fs.readFileSync(intAbs, 'utf8');
+  const intSql = idsFile ? '' : fs.readFileSync(intAbs, 'utf8');
   if (!fs.existsSync(orderAbs)) throw new Error(`找不到藥物醫囑 SQL：${orderAbs}`);
   const orderSql = fs.readFileSync(orderAbs, 'utf8');
   assertOrderSql(orderSql, orderAbs);
@@ -448,7 +527,7 @@ function prepare(args) {
   // primary 連哪個資料庫：沿用 vitals 的候選邏輯（USE > 設定 > primary.database > fallback）
   const candidates = V.patientDatabaseCandidates(encSql, primary, {}, settings, args.primaryDb);
 
-  return { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, orderSql, idsFromFile, candidates };
+  return { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, orderSql, idsFile, idsFromFile, candidates };
 }
 
 /**
@@ -467,30 +546,21 @@ function sourceKey(dbSqlInstance, dbName) {
 async function collect(opts = {}, prep = null) {
   const args = { config: 'databases.config.json', ...opts };
   const p = prep || prepare(args);
-  const { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, orderSql, candidates } = p;
+  const { settings, offset, windowMinutes, timeout, primaryRef, primary, intSql, encSql, orderSql, idsFile, candidates } = p;
 
   // 1+2. primary：interventionId 清單 + 在床病人 + HostDb 分組
-  console.log(`連 primary（${primaryRef}）查 interventionId 與在床病人...`);
+  console.log(`連 primary（${primaryRef}）查${idsFile ? '在床病人（interventionId 讀檔）' : ' interventionId 與在床病人'}...`);
   const pr = await runPrimary(
     primary,
     candidates,
-    { intSql, encSql, wantInterventions: !args.idsFile },
+    { intSql, encSql, wantInterventions: !idsFile },
     timeout
   );
-  if (!pr.database) {
-    const err = new Error(
-      `primary 查詢失敗，候選資料庫都不通：` +
-        pr.errors.map((e) => `\n    ${e.database}：${e.message}`).join('')
-    );
-    err.hint =
-      '若錯誤是「無效的物件名稱 dbo.PtLocationStay」，表示連錯資料庫，\n' +
-      '  在 SQL 檔開頭寫 USE <資料庫> 或用 --primary-db <資料庫>。';
-    throw err;
-  }
+  if (!pr.database) throw primaryFailure(pr);
 
   const idsFromFile = p.idsFromFile;
 
-  const interventions = args.idsFile ? idsFromFile : pr.interventions;
+  const interventions = idsFile ? idsFromFile : pr.interventions;
   const interventionIds = interventions.ids;
   if (!interventionIds.length) throw new Error('沒有任何 interventionId 可撈（Query 1 沒回結果，或 --ids-file 是空的）');
 
@@ -596,18 +666,16 @@ async function main() {
   const p = prepare(args);
   const outFile = V.resolveOutputName(args.out || p.settings.output, p.offset);
 
-  // 中介資料庫（sink）：有設定就直接寫進去，不再落 JSON 檔
-  const sinkSettings = sink.mergeSettings(V.loadConfig(args.config));
-  const toDb = sink.wanted(sinkSettings, args);
-  if (toDb) sink.assertConfigured(sinkSettings); // 連線沒設好就別讓它撈完一輪才發現
-  const wantFile = !toDb || !!args.out || sinkSettings.alsoWriteFile === true;
-
   // --dry-run：攤開設定，不連線
   if (args.dryRun) {
+    const sinkSettings = sink.mergeSettings(V.loadConfig(args.config));
+    const toDb = sink.wanted(sinkSettings, args);
+    if (toDb) sink.assertConfigured(sinkSettings);
+    const wantFile = !toDb || !!args.out || sinkSettings.alsoWriteFile === true;
     console.log(`\n[dry-run] 不會連線，只檢查設定\n`);
     console.log(`primary：${p.primaryRef}（${p.primary.server}:${p.primary.port || 1433}）`);
     console.log(`  候選資料庫：${p.candidates.join(' → ')}`);
-    console.log(`interventionId 來源：${args.idsFile ? args.idsFile + `（${p.idsFromFile.ids.length} 個）` : p.settings.interventionSqlFile + '（連線時跑 Query 1）'}`);
+    console.log(`interventionId 來源：${p.idsFile ? p.idsFile + `（${p.idsFromFile.ids.length} 個）` : p.settings.interventionSqlFile + '（連線時跑 Query 1）'}`);
     console.log(`在床病人 SQL：${p.settings.encountersSqlFile}`);
     console.log(`病歷紀錄表：dbo.${p.settings.table}（依 HostDb 分片，連線時才知道有幾個）`);
     console.log(`藥物醫囑 SQL：${p.settings.orderSqlFile}（每輪必撈，跟病歷紀錄同一條連線）`);
@@ -621,6 +689,22 @@ async function main() {
     console.log(`\n設定檢查完成。拿掉 --dry-run 即會實際連線。`);
     return;
   }
+
+  // 只更新 interventionId 快取，不進 charting 資料庫，也不寫 sink。
+  if (args.exportIds) {
+    const discovered = await discoverInterventions(p);
+    const outAbs = path.resolve(process.cwd(), args.exportIds);
+    const payload = interventionIdsJson(discovered.interventions, discovered.primaryDatabase);
+    fs.writeFileSync(outAbs, JSON.stringify(payload, null, 2), 'utf8');
+    console.log(`已匯出 ${payload.interventions.length} 個 interventionId：${outAbs}`);
+    return;
+  }
+
+  // 中介資料庫（sink）：有設定就直接寫進去，不再落 JSON 檔
+  const sinkSettings = sink.mergeSettings(V.loadConfig(args.config));
+  const toDb = sink.wanted(sinkSettings, args);
+  if (toDb) sink.assertConfigured(sinkSettings); // 連線沒設好就別讓它撈完一輪才發現
+  const wantFile = !toDb || !!args.out || sinkSettings.alsoWriteFile === true;
 
   const started = Date.now();
   const res = await collect(args, p);
@@ -669,7 +753,9 @@ module.exports = {
   sourceKey, // server.js 用：byCharting 的鍵＝水位線的鍵
   prepare,
   indexInterventions,
+  interventionIdsJson,
   loadIdsFile,
+  discoverInterventions,
   indexEncounters,
   buildChartingConn,
   buildNeuroQuery,

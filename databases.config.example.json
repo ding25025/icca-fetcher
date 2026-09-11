@@ -54,5 +54,12 @@
     "patientDatabase": "CISPrimaryDB"
   },
 
+  "_comment_neuro": "neuro.js 專用設定。interventionIdsFile 留 null 時，每輪都從 primary 跑 sql/neuro-interventions.sql；先用 node neuro.js --export-ids sql/neuro-intervention-ids.json 產生清單後，填入檔案路徑即可讓每輪直接讀 JSON。",
+  "neuro": {
+    "output": "neuro_{ts}.json",
+    "windowMinutes": 6,
+    "interventionIdsFile": null
+  },
+
   "_comment_sink": "中介資料庫（撈完直接寫進去的那一台）不放這個檔——設定在 sink.config.json，範例見 sink.config.example.json。這個檔的 databases[] 只放資料來源，中介庫放進來會被當成一台 primary。舊設定寫在這裡的 \"sink\" 區塊仍然讀得到，但 sink.config.json 優先。"
 }
