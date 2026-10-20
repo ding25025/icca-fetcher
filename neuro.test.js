@@ -12,8 +12,9 @@ const ID_B = '22222222-2222-2222-2222-222222222222';
 
 test('exported intervention JSON round-trips as a unique ID list', () => {
   const interventions = neuro.indexInterventions([
-    { interventionId: ID_A, terseLabel: '項目 A' },
-    { interventionId: ID_A, terseLabel: '不應覆蓋' },
+    { interventionId: ID_A, terseLabel: '項目 A', sectionLabel: 'ECMO #1', documentLabel: '表單 X' },
+    { interventionId: ID_A, terseLabel: '不應覆蓋', sectionLabel: 'ECMO #2', documentLabel: '表單 X' },
+    { interventionId: ID_A, terseLabel: null, sectionLabel: 'ECMO #1', documentLabel: null },
     { interventionId: ID_B, terseLabel: null },
   ]);
   const payload = neuro.interventionIdsJson(interventions, 'CISPrimaryDB');
@@ -24,9 +25,18 @@ test('exported intervention JSON round-trips as a unique ID list', () => {
     assert.equal(payload.primaryDatabase, 'CISPrimaryDB');
     assert.equal(payload.count, 2);
     assert.equal(payload.interventions.length, 2);
+    // 同一個 ID 掛在兩個區段：區段名去重相接、表單名只留一份，terseLabel 以第一次為準
+    assert.deepEqual(payload.interventions[0], {
+      interventionId: ID_A, terseLabel: '項目 A', sectionLabel: 'ECMO #1; ECMO #2', documentLabel: '表單 X',
+    });
+    assert.deepEqual(payload.interventions[1], {
+      interventionId: ID_B, terseLabel: null, sectionLabel: null, documentLabel: null,
+    });
     assert.deepEqual(neuro.loadIdsFile(file), {
       ids: [ID_A, ID_B],
       labels: { [ID_A]: '項目 A', [ID_B]: null },
+      sections: { [ID_A]: 'ECMO #1; ECMO #2' },
+      documents: { [ID_A]: '表單 X' },
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -62,6 +72,8 @@ test('JSON list is not re-scanned line by line, so a GUID inside a label is not 
     assert.deepEqual(neuro.loadIdsFile(file), {
       ids: [ID_A],
       labels: { [ID_A]: `備註 ${ID_B}` },
+      sections: {},
+      documents: {},
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -87,6 +99,8 @@ test('plain text list still parses GUID plus label per line', () => {
     assert.deepEqual(neuro.loadIdsFile(file), {
       ids: [ID_A, ID_B],
       labels: { [ID_A]: '昏迷指數', [ID_B]: null },
+      sections: {},
+      documents: {},
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

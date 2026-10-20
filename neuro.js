@@ -181,31 +181,67 @@ function buildChartingConn(template, dbSqlInstance, dbName) {
 const GUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
 const upper = (g) => String(g).trim().toUpperCase();
 
-/** 將一個 GUID 加進清單；已出現的 ID 不重複計算。 */
-function addInterventionId(out, value, label = null) {
+// 同一個 intervention 可能掛在同一張表單的好幾個區段（體外維生表單的 Pump Speed 同時在
+// ECMO #1/#2/#3、HeartMate II/III、HeartWare 底下），而 PtIntervention 的列分不出來自哪個
+// 區段，所以區段／表單名稱收成「去重後用這個分隔相接」的一個字串，跟著每一筆紀錄寫出去。
+const LABEL_SEP = '; ';
+
+const clean = (v) => (v != null && String(v).trim() ? String(v).trim() : null);
+
+/** 把區段／表單名稱併進既有的字串：去重、保持第一次出現的順序 */
+function mergeLabel(existing, incoming) {
+  const parts = existing ? existing.split(LABEL_SEP) : [];
+  for (const p of String(incoming == null ? '' : incoming).split(LABEL_SEP)) {
+    const v = p.trim();
+    if (v && !parts.includes(v)) parts.push(v);
+  }
+  return parts.length ? parts.join(LABEL_SEP) : null;
+}
+
+/** 空的對照表：ids 是原字串 GUID，其餘三個都是「大寫 GUID → 字串」 */
+const emptyIndex = () => ({ ids: [], labels: {}, sections: {}, documents: {} });
+
+/**
+ * 將一個 GUID 加進清單。同一個 ID 再出現時 terseLabel 以第一次為準，
+ * 區段／表單名稱則併進去（見 LABEL_SEP）。回傳是否為第一次看到這個 ID。
+ */
+function addInterventionId(out, value, label = null, section = null, document = null) {
   const match = String(value == null ? '' : value).match(GUID_RE);
   if (!match) return false;
   const id = match[0];
   const key = upper(id);
-  if (out.labels[key] !== undefined) return false;
-  out.ids.push(id);
-  out.labels[key] = label != null && String(label).trim() ? String(label).trim() : null;
-  return true;
+  const fresh = out.labels[key] === undefined;
+  if (fresh) {
+    out.ids.push(id);
+    out.labels[key] = clean(label);
+  }
+  if (clean(section)) out.sections[key] = mergeLabel(out.sections[key], section);
+  if (clean(document)) out.documents[key] = mergeLabel(out.documents[key], document);
+  return fresh;
 }
 
-/** 把 Query 1 回來的列變成 { ids:[原字串GUID], labels:{大寫GUID: terseLabel} } */
+/**
+ * 把 Query 1 回來的列變成 { ids, labels, sections, documents }（見 emptyIndex）。
+ * 同一個 ID 掛在好幾個區段時 SQL 會回好幾列，這裡併成一個 ID、區段名相接。
+ */
 function indexInterventions(rows) {
-  const out = { ids: [], labels: {} };
-  for (const r of rows || []) addInterventionId(out, r && r.interventionId, r && r.terseLabel);
+  const out = emptyIndex();
+  for (const r of rows || []) {
+    if (r) addInterventionId(out, r.interventionId, r.terseLabel, r.sectionLabel, r.documentLabel);
+  }
   return out;
 }
 
 /** 將目前的 ID／標籤對照轉成可供下次直接讀取的 JSON 格式。 */
 function interventionIdsJson(interventions, primaryDatabase) {
   const labels = (interventions && interventions.labels) || {};
+  const sections = (interventions && interventions.sections) || {};
+  const documents = (interventions && interventions.documents) || {};
   const rows = (interventions && interventions.ids || []).map((id) => ({
     interventionId: id,
     terseLabel: labels[upper(id)] || null,
+    sectionLabel: sections[upper(id)] || null,
+    documentLabel: documents[upper(id)] || null,
   }));
   return {
     generatedAt: new Date().toISOString(),
@@ -222,10 +258,12 @@ function interventionIdsJson(interventions, primaryDatabase) {
 function loadIdsFile(file) {
   const abs = path.resolve(process.cwd(), file);
   if (!fs.existsSync(abs)) throw new Error(`找不到 interventionId 檔：${abs}`);
-  const out = { ids: [], labels: {} };
+  const out = emptyIndex();
   const text = fs.readFileSync(abs, 'utf8').replace(/^﻿/, '');
 
-  // --export-ids 產出的 JSON 為 { interventions: [{ interventionId, terseLabel }] }。
+  // --export-ids 產出的 JSON 為
+  //   { interventions: [{ interventionId, terseLabel, sectionLabel, documentLabel }] }
+  // （後兩欄是寫進中介庫的區段／表單名稱，舊檔沒有這兩欄時寫 NULL）。
   // 也接受直接的陣列，方便使用者自行維護清單。是 JSON 就只認列資料，
   // 不再逐行掃文字，免得標籤裡出現的 GUID 被當成另一個 ID。
   let parsed;
@@ -250,7 +288,8 @@ function loadIdsFile(file) {
       if (typeof row === 'string') addInterventionId(out, row);
       else if (row && typeof row === 'object') {
         addInterventionId(out, row.interventionId != null ? row.interventionId : row.id,
-          row.terseLabel != null ? row.terseLabel : row.label);
+          row.terseLabel != null ? row.terseLabel : row.label,
+          row.sectionLabel, row.documentLabel);
       }
     }
   } else {
@@ -580,8 +619,11 @@ async function collect(opts = {}, prep = null) {
     )
   );
 
-  // 4. 合併 + 併 terseLabel / 病歷號 + 時區換算
+  // 4. 合併 + 併 terseLabel／區段／表單名 / 病歷號 + 時區換算
   const labelOf = (id) => interventions.labels[upper(id)] || null;
+  // 區段／表單名是 interventionId 的函數（來自 Query 1）；藥物醫囑的列不在清單裡，所以是 null
+  const sectionOf = (id) => interventions.sections[upper(id)] || null;
+  const documentOf = (id) => interventions.documents[upper(id)] || null;
   const useUtc = args.utc || settings.timesInUtc;
   // 同一個病人（ptEncounterId）的紀錄收在一起：{ lifetimeNumber, bed, records:[] }
   const byPatient = new Map();
@@ -609,6 +651,8 @@ async function collect(opts = {}, prep = null) {
       const rec = {
         interventionId: r.interventionId,
         terseLabel: r.terseLabel != null ? String(r.terseLabel).trim() : labelOf(r.interventionId),
+        sectionLabel: sectionOf(r.interventionId),
+        documentLabel: documentOf(r.interventionId),
         terseForm: r.terseForm,
         verboseForm: r.verboseForm,
         storeTime: r.storeTime,

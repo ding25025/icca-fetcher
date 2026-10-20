@@ -23,6 +23,8 @@
        terseLabel               → NVARCHAR(100) → NVARCHAR(32)
        updatedAt / changedAt    → 移除（列寫進去就不會再被動到）
        索引                     → CX_CISData、IX_*_storeTime、IX_*_rowHash
+       （新增，2026-10-20）      → sectionLabel NVARCHAR(256) / documentLabel NVARCHAR(128)
+                                  項目掛在哪個區段／哪張表單；不進 rowHash，既有的列留 NULL
 
    ⚠ 表裡還沒有正式資料的話，最省事的做法是直接砍掉重建：
        DROP TABLE dbo.CDSUnvalidatedData;
@@ -274,6 +276,25 @@ BEGIN
     CREATE NONCLUSTERED INDEX [IX_CISData_rowHash] ON dbo.CISData ([rowHash]);
 
   PRINT N'dbo.CISData 轉換完成';
+END
+GO
+
+/* ---------------------------------------------------------------------------
+   2h. CISData：補上區段／表單名稱兩欄（2026-10-20）
+
+   sectionLabel / documentLabel 是 interventionId 的函數（sql/neuro-interventions.sql 帶出來），
+   不是紀錄本身的內容，所以刻意不進 rowHash——上面補算雜湊的算式不用改，既有的列也不會
+   因為多了兩欄就被當成新內容再寫一次。既有的列這兩欄留 NULL（寫進去的列不回頭改）；
+   之後新寫進來的列才有值。sink.js 的 ensureTables 也會自己補這兩欄，這一段是給
+   ensureTables 關掉、或想先手動建好的人用的。
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.CISData', N'U') IS NOT NULL
+BEGIN
+  IF COL_LENGTH('dbo.CISData', 'sectionLabel') IS NULL
+    ALTER TABLE dbo.CISData ADD [sectionLabel] NVARCHAR(256) NULL;
+  IF COL_LENGTH('dbo.CISData', 'documentLabel') IS NULL
+    ALTER TABLE dbo.CISData ADD [documentLabel] NVARCHAR(128) NULL;
+  PRINT N'dbo.CISData sectionLabel / documentLabel 就緒';
 END
 GO
 

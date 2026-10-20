@@ -485,7 +485,7 @@
     <dl class="docmeta">
       <div><dt>版本</dt><dd>v0.3（草案）</dd></div>
       <div><dt>日期</dt><dd>2026-08-06</dd></div>
-      <div><dt>最後更新</dt><dd>2026-08-14</dd></div>
+      <div><dt>最後更新</dt><dd>2026-10-20</dd></div>
       <div><dt>作者</dt><dd>Vicky Wu</dd></div>
       <div><dt>資料來源</dt><dd>Philips ICCA</dd></div>
       <div><dt>涵蓋範圍</dt><dd>成人加護病房</dd></div>
@@ -1011,6 +1011,8 @@
   chartTime       <span class="k">DATETIME</span>   <span class="k">NOT NULL</span>,  <span class="c">-- 識別鍵</span>
   lifetimeNumber  <span class="k">NVARCHAR</span>(32)   <span class="k">NOT NULL</span>,
   terseLabel      <span class="k">NVARCHAR</span>(32)  <span class="k">NULL</span>,
+  sectionLabel    <span class="k">NVARCHAR</span>(256)  <span class="k">NULL</span>,   <span class="c">-- 項目掛在表單的哪個區段</span>
+  documentLabel   <span class="k">NVARCHAR</span>(128)  <span class="k">NULL</span>,   <span class="c">-- 項目所在的表單</span>
   terseForm       <span class="k">NVARCHAR</span>(32)   <span class="k">NULL</span>,   <span class="c">-- 不含單位</span>
   verboseForm     <span class="k">NVARCHAR</span>(256)  <span class="k">NULL</span>,   <span class="c">-- 含單位</span>
   storeTime       <span class="k">DATETIME</span>   <span class="k">NULL</span>,   <span class="c">-- 增量讀取的水位線；也是版本的先後</span>
@@ -1057,6 +1059,28 @@
                 <td class="type">nvarchar(32)</td>
                 <td class="nul y">是</td>
                 <td>項目名稱，例如「昏迷指數」、「RASS」、「體溫」；藥物醫囑的列則是<b>藥品醫囑名稱</b>。尚未建檔時為 <code>NULL</code>。</td>
+              </tr>
+              <tr>
+                <td class="field">sectionLabel</td>
+                <td class="type">nvarchar(256)</td>
+                <td class="nul y">是</td>
+                <td>
+                  這個項目掛在 ICCA 表單的<b>哪個區段</b>，例如「神經系統病人生命徵象」、「Intake &amp; Output」。
+                  同一個項目掛在好幾個區段時以「<code>; </code>」相接，例如體外維生表單的 Pump Speed 是
+                  <code>ECMO #1; ECMO #2; ECMO #3; HeartMate II; HeartMate III; HeartWare</code>——
+                  這是該項目在表單上的位置，<b>不代表這一筆填在哪一台機器底下</b>（來源分不出來）。
+                  藥物醫囑的列，以及 2026-10 加欄之前寫進來的列，為 <code>NULL</code>。
+                </td>
+              </tr>
+              <tr>
+                <td class="field">documentLabel</td>
+                <td class="type">nvarchar(128)</td>
+                <td class="nul y">是</td>
+                <td>
+                  這個項目所在的 ICCA <b>表單名稱</b>，例如「神經學檢查及昏迷評估紀錄」、「生命徵象及治療紀錄」。
+                  同名項目（三種 FiO2）靠它分辨來自哪張表單。
+                  藥物醫囑的列，以及加欄之前寫進來的列，為 <code>NULL</code>。
+                </td>
               </tr>
               <tr>
                 <td class="field">terseForm</td>
@@ -1120,7 +1144,8 @@
             <thead>
               <tr>
                 <th>interventionId</th><th>chartTime</th>
-                <th>lifetimeNumber</th><th>terseLabel</th><th>terseForm</th><th>verboseForm</th>
+                <th>lifetimeNumber</th><th>terseLabel</th><th>sectionLabel</th><th>documentLabel</th>
+                <th>terseForm</th><th>verboseForm</th>
                 <th>storeTime</th><th>isDeleted</th>
                 <th>insertedAt <span style="text-transform: none;">(UTC+8)</span></th>
               </tr>
@@ -1128,37 +1153,37 @@
             <tbody>
               <tr class="hl">
                 <td>9B1DEB4D…0C0F</td><td>2026-07-31 11:20:00</td>
-                <td>A123456</td><td>昏迷指數</td><td>E4V5M6</td><td>E4V5M6</td>
+                <td>A123456</td><td>昏迷指數</td><td>神經系統病人生命徵象</td><td>神經學檢查及昏迷評估紀錄</td><td>E4V5M6</td><td>E4V5M6</td>
                 <td>2026-07-31 11:24:03</td><td>0</td>
                 <td class="audit">2026-07-31 11:25:07.118</td>
               </tr>
               <tr class="hl">
                 <td>9B1DEB4D…0C0F</td><td>2026-07-31 11:20:00</td>
-                <td>A123456</td><td>昏迷指數</td><td>E3V4M6</td><td>E3V4M6</td>
+                <td>A123456</td><td>昏迷指數</td><td>神經系統病人生命徵象</td><td>神經學檢查及昏迷評估紀錄</td><td>E3V4M6</td><td>E3V4M6</td>
                 <td>2026-07-31 12:05:12</td><td>0</td>
                 <td class="audit">2026-07-31 12:05:41.900</td>
               </tr>
               <tr>
                 <td>6F9619FF…D011</td><td>2026-07-31 11:20:00</td>
-                <td>A123456</td><td>RASS 鎮靜程度評估表</td><td>-2 輕度鎮靜</td><td>-2 輕度鎮靜</td>
+                <td>A123456</td><td>RASS 鎮靜程度評估表</td><td>生命徵象</td><td>生命徵象及治療紀錄</td><td>-2 輕度鎮靜</td><td>-2 輕度鎮靜</td>
                 <td>2026-07-31 11:24:03</td><td>0</td>
                 <td class="audit">2026-07-31 11:25:07.118</td>
               </tr>
               <tr>
                 <td>A0EEBC99…6655</td><td>2026-07-31 11:00:00</td>
-                <td>A123456</td><td>體溫(˚C)</td><td>37.2腋溫</td><td>37.2腋溫</td>
+                <td>A123456</td><td>體溫(˚C)</td><td>生命徵象</td><td>生命徵象及治療紀錄</td><td>37.2腋溫</td><td>37.2腋溫</td>
                 <td>2026-07-31 11:06:08</td><td>0</td>
                 <td class="audit">2026-07-31 11:25:07.118</td>
               </tr>
               <tr>
                 <td>1B4E28BA…B18D</td><td>2026-07-31 11:00:00</td>
-                <td>A123456</td><td>FiO2 %.</td><td>40</td><td>40 %</td>
+                <td>A123456</td><td>FiO2 %.</td><td>呼吸治療參數</td><td>呼吸照護紀錄</td><td>40</td><td>40 %</td>
                 <td>2026-07-31 11:06:08</td><td>0</td>
                 <td class="audit">2026-07-31 11:25:07.118</td>
               </tr>
               <tr>
                 <td>9B1DEB4D…0C0F</td><td>2026-07-31 11:00:00</td>
-                <td>A234567</td><td>昏迷指數</td><td>E1VTM4</td><td>E1VTM4</td>
+                <td>A234567</td><td>昏迷指數</td><td>神經系統病人生命徵象</td><td>神經學檢查及昏迷評估紀錄</td><td>E1VTM4</td><td>E1VTM4</td>
                 <td>2026-07-31 11:12:04</td><td>0</td>
                 <td class="audit">2026-07-31 11:25:07.118</td>
               </tr>
@@ -1173,7 +1198,9 @@
           要現值就取同一組識別鍵裡 <code>storeTime</code> 最大的那一列（寫法見 §4）。<br>
           第 4、5 列是體溫與 FiO2，<b>不是神經評估但一樣在本表</b>；最後一列是另一位病人的同一個項目
           （同 <code>interventionId</code>、不同 <code>lifetimeNumber</code>）。<br>
-          <code>terseForm</code> 是<b>不含單位</b>的值、<code>verboseForm</code> 通常是<b>含單位</b>的完整版本。
+          <code>terseForm</code> 是<b>不含單位</b>的值、<code>verboseForm</code> 通常是<b>含單位</b>的完整版本。<br>
+          <code>sectionLabel</code>／<code>documentLabel</code> 是項目在 ICCA 表單上的區段與表單名稱，
+          由 <code>interventionId</code> 決定，同一個項目的每一列都一樣。
         </p>
       </div>
 
@@ -1224,7 +1251,7 @@
       <pre><span class="c">-- 同一組識別鍵底下可能有多列（先後版本），取最新那一列</span>
 <span class="k">WITH</span> inc <span class="k">AS</span> (
   <span class="k">SELECT</span> interventionId, chartTime, lifetimeNumber, terseLabel,
-         terseForm, verboseForm, storeTime, isDeleted,
+         sectionLabel, documentLabel, terseForm, verboseForm, storeTime, isDeleted,
          ROW_NUMBER() <span class="k">OVER</span> (
            <span class="k">PARTITION BY</span> lifetimeNumber, interventionId, chartTime
            <span class="k">ORDER BY</span> storeTime <span class="k">DESC</span>

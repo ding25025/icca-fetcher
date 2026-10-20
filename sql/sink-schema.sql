@@ -25,6 +25,8 @@ BEGIN
     [chartTime] DATETIME NOT NULL,
     [lifetimeNumber] NVARCHAR(32) NOT NULL,
     [terseLabel] NVARCHAR(32) NULL,
+    [sectionLabel] NVARCHAR(256) NULL,
+    [documentLabel] NVARCHAR(128) NULL,
     [terseForm] NVARCHAR(32) NULL,
     [verboseForm] NVARCHAR(256) NULL,
     [storeTime] DATETIME NULL,

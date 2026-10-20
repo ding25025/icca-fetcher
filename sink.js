@@ -205,6 +205,14 @@ const NEURO_SPEC = {
     // 項目名。32 是照 ICCA 來源端的欄寬設的（規格 §3 也是 32），來源不會更長，
     // 所以這一欄不會截斷。valuesOf 的截斷計數是所有文字欄共用的保險，不是為它準備的。
     { name: 'terseLabel', type: 'NVARCHAR(32)', kind: 'text' },
+    // 這個項目掛在表單的哪個區段／哪張表單（sql/neuro-interventions.sql 帶出來的
+    // sectionLabel / documentLabel，neuro.js 依 interventionId 併上去）。
+    // 它們是 interventionId 的函數、不是這筆紀錄本身的內容，所以不進 rowHash（hash: false）：
+    // 加這兩欄不會讓既有的列全部被當成「新內容」再寫一次。
+    // 同一個 intervention 掛在好幾個區段時（體外維生表單的 Pump Speed）用「; 」相接；
+    // 藥物醫囑的列不在清單裡、加欄之前寫進去的列也沒有值，這兩種都是 NULL。
+    { name: 'sectionLabel', type: 'NVARCHAR(256)', kind: 'text', hash: false },
+    { name: 'documentLabel', type: 'NVARCHAR(128)', kind: 'text', hash: false },
     // terseForm 是不帶單位的原始值（E4V5M6、37.2）；verboseForm 是含單位／完整敘述的版本
     { name: 'terseForm', type: 'NVARCHAR(32)', kind: 'text' },
     { name: 'verboseForm', type: 'NVARCHAR(256)', kind: 'text' },
@@ -309,17 +317,27 @@ function ddlScript(settings) {
   return parts.join('\n');
 }
 
-/** 缺表就建（已存在的完全不動）。DDL 不放在寫入的交易裡，免得長時間佔著結構鎖。 */
+/**
+ * 缺表就建；表已經在、但 spec 後來多出來的「可為 NULL、不是鑰匙」的欄位就補上
+ * （ALTER TABLE ADD，既有的列那一欄是 NULL，不會動到任何既有的值）。
+ * 其他差異（型別、索引、NOT NULL 欄）不處理，那種要走 sql/sink-migrate.sql。
+ * DDL 不放在寫入的交易裡，免得長時間佔著結構鎖。
+ */
 async function ensureTable(pool, spec, settings) {
   const d = ddlFor(spec, settings);
   // 用 sp_executesql 而不是直接寫 CREATE TABLE：DDL 在 IF 區塊裡會在編譯期就被檢查，
   // 表已經存在時「索引重複」之類的錯誤會在還沒執行到 IF 之前就冒出來。
   const quoted = (s) => `EXEC sp_executesql N'${s.replace(/'/g, "''")}';`;
+  const addable = spec.columns.filter((c) => !c.key && !c.notNull);
   await work.request(pool).batch(
     `SET NOCOUNT ON;
 IF OBJECT_ID(N'${d.full}', N'U') IS NULL
 BEGIN
   ${[d.create, ...d.indexes].map(quoted).join('\n  ')}
+END
+ELSE
+BEGIN
+  ${addable.map((c) => `IF COL_LENGTH(N'${d.full}', N'${c.name}') IS NULL ${quoted(`ALTER TABLE ${d.full} ADD [${c.name}] ${c.type} NULL`)}`).join('\n  ')}
 END`
   );
   return d;
@@ -385,14 +403,16 @@ function valuesOf(spec, row, stats) {
  * 格式刻意做成 SQL 端也算得出來的樣子（見 sql/sink-migrate.sql 補算既有列的那一段）：
  *   欄位值以 U+001F 相接 → 以 UTF-16LE 編碼 → SHA-1
  *   null 一律當空字串；時間取到秒（19 個字），對上 CONVERT(NVARCHAR(19), col, 120)
+ *   hash: false 的欄位（由 interventionId 推得的區段／表單名）不參與
  * 這一段動到就等於「所有既有的列都算不出同一個雜湊」，等同全部重寫一次，不要隨手改。
  */
 const HASH_SEP = ''; // NCHAR(31)，資料裡不會出現的分隔字元
 function rowHashOf(spec, values) {
-  const parts = spec.columns.map((c, i) => {
+  const parts = [];
+  spec.columns.forEach((c, i) => {
+    if (c.hash === false) return;
     const v = values[i];
-    if (v == null) return '';
-    return c.kind === 'time' ? String(v).slice(0, 19) : String(v);
+    parts.push(v == null ? '' : c.kind === 'time' ? String(v).slice(0, 19) : String(v));
   });
   return crypto.createHash('sha1').update(parts.join(HASH_SEP), 'utf16le').digest();
 }
@@ -609,6 +629,8 @@ function flattenNeuro(rows) {
         chartTime: r.chartTime,
         lifetimeNumber: g.lifetimeNumber != null ? g.lifetimeNumber : null,
         terseLabel: r.terseLabel,
+        sectionLabel: r.sectionLabel != null ? r.sectionLabel : null,
+        documentLabel: r.documentLabel != null ? r.documentLabel : null,
         terseForm: r.terseForm,
         verboseForm: r.verboseForm,
         storeTime: r.storeTime,

@@ -787,6 +787,8 @@ node neuro.js --to-db   # 反過來：設定沒開，這一次臨時寫進去
 | `chartTime` | DATETIME2(0) | 這筆紀錄代表的臨床時間 🔑 |
 | `lifetimeNumber` | NVARCHAR(50) | 病歷號，查不到就整列不寫（表裡沒有床號） |
 | `terseLabel` | NVARCHAR(32) | 項目名。超過 32 個字會被截斷並在執行訊息裡警告 |
+| `sectionLabel` | NVARCHAR(256) | 項目掛在表單的哪個區段（`FSSection.displayLabel`）。同一個項目掛在好幾個區段時用 `; ` 相接（體外維生表單的 Pump Speed 是 `ECMO #1; ECMO #2; …`）。藥物醫囑的列是 NULL。**不進 `rowHash`** |
+| `documentLabel` | NVARCHAR(128) | 項目所在的表單（`Document.displayLabel`）。藥物醫囑的列是 NULL。**不進 `rowHash`** |
 | `terseForm` / `verboseForm` | NVARCHAR(32) / (256) | 填寫值：不含單位 / 含單位 |
 | `storeTime` | DATETIME2(0) | ICCA 端最後寫入的時間，**下游的水位線**，也是版本的先後 |
 | `isDeleted` | BIT | 作廢註記，**由來源 `PtIntervention` 帶進來**：ICCA 那筆被刪除／作廢時是 1。撈的時候不過濾，下游要看得到「這筆沒了」這個變化 |
@@ -829,7 +831,8 @@ ORDER BY storeTime, lifetimeNumber, terseLabel, propName, chartTime;
 
 ```sql
 WITH inc AS (
-  SELECT interventionId, chartTime, lifetimeNumber, terseForm, verboseForm, storeTime, isDeleted,
+  SELECT interventionId, chartTime, lifetimeNumber, terseLabel, sectionLabel, documentLabel,
+         terseForm, verboseForm, storeTime, isDeleted,
          ROW_NUMBER() OVER (PARTITION BY lifetimeNumber, interventionId, chartTime
                             ORDER BY storeTime DESC) AS rn
   FROM   dbo.CISData WITH (NOLOCK)
