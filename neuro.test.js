@@ -58,6 +58,19 @@ test('resolveSection picks the one section the descriptor instance name points a
   assert.equal(neuro.resolveSection(null, 'Pump Speed (#1)'), null);
 });
 
+test('every instance name seen in production (2026-10-21) resolves to exactly one section', () => {
+  const list = 'ECMO #1; ECMO #2; ECMO #3; HeartMate II; HeartMate III; HeartWare; LVAD; RVAD';
+  const expect = { '#1': 'ECMO #1', '#2': 'ECMO #2', '#3': 'ECMO #3', 'HeartMate II': 'HeartMate II',
+    'HeartMate III': 'HeartMate III', HeartWare: 'HeartWare', LVAD: 'LVAD', RVAD: 'RVAD' };
+  for (const item of ['Pump Speed', 'Blood Flow (L/min)', 'Gas Flow (L/min)', 'FiO2', 'Pulse Index', 'Pump Power']) {
+    for (const [suffix, section] of Object.entries(expect)) {
+      assert.equal(neuro.resolveSection(list, `${item} (${suffix})`), section, `${item} (${suffix})`);
+    }
+  }
+  // Pulse Index / Pump Power 只掛在 HeartMate 兩個區段，候選清單較短也要對得到
+  assert.equal(neuro.resolveSection('HeartMate II; HeartMate III', 'Pulse Index (HeartMate III)'), 'HeartMate III');
+});
+
 test('neuro.interventionIdsFile skips the discovery SQL', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'icca-neuro-'));
   const file = path.join(dir, 'interventions.json');
