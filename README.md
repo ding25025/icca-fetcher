@@ -892,7 +892,7 @@ SQL 端的等價寫法在 [sql/sink-migrate.sql](sql/sink-migrate.sql)（補算�
 |---|---|---|
 | `enabled` | `false` | 沒設成 `true` 就完全不碰中介資料庫 |
 | `schema` / `vitalsTable` / `neuroTable` | `dbo` / `CDSUnvalidatedData` / `CISData` | 表名 |
-| `ensureTables` | `true` | 缺表就自動建；院內 DBA 先建好之後可以關掉 |
+| `ensureTables` | `true` | 缺表就自動建、缺欄就自動補；表存在但**沒有叢集索引**（舊版建的、遷移只跑一半）會拒絕寫入並提示跑 `sql/sink-migrate.sql`。院內 DBA 先建好之後可以關掉 |
 | `alsoWriteFile` | `false` | 寫進資料庫之後還要不要照舊落一份 JSON 檔 |
 | `batchRows` | 自動 | 一批幾列；0 = 依欄位數算，維持在 SQL Server 2100 個參數的上限內 |
 | `schedule` | 無 | `server.js` 內建排程，見 [SERVER.md](SERVER.md) |

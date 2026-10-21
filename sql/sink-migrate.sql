@@ -51,8 +51,26 @@ END
 ELSE IF COL_LENGTH('dbo.CDSUnvalidatedData', 'chartTime') IS NOT NULL
      AND COL_LENGTH('dbo.CDSUnvalidatedData', 'textValue') IS NOT NULL
      AND COL_LENGTH('dbo.CDSUnvalidatedData', 'isDelete')  IS NULL
+     AND EXISTS (SELECT 1 FROM sys.indexes
+                 WHERE object_id = OBJECT_ID('dbo.CDSUnvalidatedData') AND is_primary_key = 1)
 BEGIN
   PRINT N'dbo.CDSUnvalidatedData 已經是新結構 → 跳過';
+END
+ELSE IF COL_LENGTH('dbo.CDSUnvalidatedData', 'chartTime') IS NOT NULL
+     AND COL_LENGTH('dbo.CDSUnvalidatedData', 'textValue') IS NOT NULL
+     AND COL_LENGTH('dbo.CDSUnvalidatedData', 'isDelete')  IS NULL
+BEGIN
+  -- 欄位已經是新的，但主鍵沒建起來：上次跑到 1f 失敗（通常是鍵有重複），
+  -- 之後再跑又被上面的「已經是新結構」略過。表就一直是 HEAP，
+  -- 下游照 storeTime 排序分頁的查詢會整表掃描，列數一多就逾時。
+  -- 這裡只補主鍵與索引，不再動欄位。主鍵建不起來就是鍵有重複，先清掉再來。
+  PRINT N'--- dbo.CDSUnvalidatedData 欄位已轉換、缺主鍵 → 補建 ---';
+  ALTER TABLE dbo.CDSUnvalidatedData
+    ADD CONSTRAINT [PK_CDSUnvalidatedData]
+    PRIMARY KEY CLUSTERED ([lifetimeNumber], [terseLabel], [propName], [chartTime]);
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_CDSUnvalidatedData_storeTime' AND object_id = OBJECT_ID('dbo.CDSUnvalidatedData'))
+    CREATE NONCLUSTERED INDEX [IX_CDSUnvalidatedData_storeTime] ON dbo.CDSUnvalidatedData ([storeTime]);
+  PRINT N'dbo.CDSUnvalidatedData 主鍵補建完成';
 END
 ELSE
 BEGIN
@@ -168,8 +186,21 @@ BEGIN
 END
 ELSE IF COL_LENGTH('dbo.CISData', 'rowHash') IS NOT NULL
      AND COL_LENGTH('dbo.CISData', 'changedAt') IS NULL
+     AND EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'CX_CISData' AND object_id = OBJECT_ID('dbo.CISData'))
 BEGIN
   PRINT N'dbo.CISData 已經是新結構 → 跳過';
+END
+ELSE IF COL_LENGTH('dbo.CISData', 'rowHash') IS NOT NULL
+     AND COL_LENGTH('dbo.CISData', 'changedAt') IS NULL
+BEGIN
+  -- 欄位已經是新的，但叢集索引沒建起來（上次 2g 沒跑完）。只補索引，不動欄位。
+  PRINT N'--- dbo.CISData 欄位已轉換、缺叢集索引 → 補建 ---';
+  CREATE CLUSTERED INDEX [CX_CISData] ON dbo.CISData ([ptEncounterId], [interventionId], [chartTime], [storeTime]);
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_CISData_storeTime' AND object_id = OBJECT_ID('dbo.CISData'))
+    CREATE NONCLUSTERED INDEX [IX_CISData_storeTime] ON dbo.CISData ([storeTime]);
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_CISData_rowHash' AND object_id = OBJECT_ID('dbo.CISData'))
+    CREATE NONCLUSTERED INDEX [IX_CISData_rowHash] ON dbo.CISData ([rowHash]);
+  PRINT N'dbo.CISData 索引補建完成';
 END
 ELSE
 BEGIN

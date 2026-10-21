@@ -323,14 +323,17 @@ function ddlScript(settings) {
  * 其他差異（型別、索引、NOT NULL 欄）不處理，那種要走 sql/sink-migrate.sql。
  * DDL 不放在寫入的交易裡，免得長時間佔著結構鎖。
  */
-async function ensureTable(pool, spec, settings) {
+function ensureTableSql(spec, settings) {
   const d = ddlFor(spec, settings);
   // 用 sp_executesql 而不是直接寫 CREATE TABLE：DDL 在 IF 區塊裡會在編譯期就被檢查，
   // 表已經存在時「索引重複」之類的錯誤會在還沒執行到 IF 之前就冒出來。
   const quoted = (s) => `EXEC sp_executesql N'${s.replace(/'/g, "''")}';`;
   const addable = spec.columns.filter((c) => !c.key && !c.notNull);
-  await work.request(pool).batch(
-    `SET NOCOUNT ON;
+  // 最後回報叢集索引在不在（index_id = 1 就是叢集索引，主鍵或 CX_ 都算）。
+  // 表是舊版建的、sql/sink-migrate.sql 又只跑了一半時會是 HEAP：寫入照常、
+  // 但去重的 NOT EXISTS 與下游照 storeTime 分頁的查詢都會整表掃描，列數一多就逾時。
+  // 這種狀態要在啟動時就擋下來，不要等廠商查到 503 才發現。
+  const sql = `SET NOCOUNT ON;
 IF OBJECT_ID(N'${d.full}', N'U') IS NULL
 BEGIN
   ${[d.create, ...d.indexes].map(quoted).join('\n  ')}
@@ -338,8 +341,22 @@ END
 ELSE
 BEGIN
   ${addable.map((c) => `IF COL_LENGTH(N'${d.full}', N'${c.name}') IS NULL ${quoted(`ALTER TABLE ${d.full} ADD [${c.name}] ${c.type} NULL`)}`).join('\n  ')}
-END`
-  );
+END
+SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'${d.full}') AND index_id = 1)
+            THEN 1 ELSE 0 END AS hasClustered;`;
+  return { ...d, sql };
+}
+
+async function ensureTable(pool, spec, settings) {
+  const d = ensureTableSql(spec, settings);
+  const result = await work.request(pool).batch(d.sql);
+  const row = result && result.recordset && result.recordset[0];
+  if (row && Number(row.hasClustered) === 0) {
+    throw new Error(
+      `${d.full} 沒有叢集索引（表是 HEAP）。這通常是舊版建的表、sql/sink-migrate.sql 只跑了一半。` +
+        `請先停掉服務、在中介資料庫執行 sql/sink-migrate.sql 補建主鍵與索引，再啟動。`
+    );
+  }
   return d;
 }
 
@@ -748,6 +765,7 @@ module.exports = {
   flattenNeuro,
   ddlScript,
   ddlFor,
+  ensureTableSql,
   ensureTable,
   appendSql,
   rowHashOf,

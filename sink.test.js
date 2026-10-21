@@ -66,3 +66,30 @@ test('CREATE TABLE for CISData includes the two label columns', () => {
   assert.match(d.create, /\[sectionLabel\] NVARCHAR\(256\) NULL/);
   assert.match(d.create, /\[documentLabel\] NVARCHAR\(128\) NULL/);
 });
+
+test('ensureTable batch creates the table with its clustered key and reports whether one exists', () => {
+  const settings = { schema: 'dbo', neuroTable: 'CISData', vitalsTable: 'CDSUnvalidatedData' };
+  const v = sink.ensureTableSql(sink.VITALS_SPEC, settings);
+  assert.match(v.sql, /IF OBJECT_ID\(N'\[dbo\]\.\[CDSUnvalidatedData\]', N'U'\) IS NULL/);
+  assert.match(v.sql, /PRIMARY KEY CLUSTERED/);
+  assert.match(v.sql, /ALTER TABLE \[dbo\]\.\[CDSUnvalidatedData\] ADD \[textValue\]/);
+  assert.match(v.sql, /AND index_id = 1\)\s+THEN 1 ELSE 0 END AS hasClustered;$/);
+
+  const n = sink.ensureTableSql(sink.NEURO_SPEC, settings);
+  assert.match(n.sql, /CREATE CLUSTERED INDEX \[CX_CISData\]/);
+  assert.match(n.sql, /ADD \[sectionLabel\]/);
+  assert.match(n.sql, /AS hasClustered;$/);
+});
+
+test('ensureTable refuses a heap and accepts a clustered table', async () => {
+  const settings = { schema: 'dbo', neuroTable: 'CISData', vitalsTable: 'CDSUnvalidatedData' };
+  const poolReturning = (hasClustered) => ({
+    request: () => ({ batch: async () => ({ recordset: [{ hasClustered }] }) }),
+  });
+  await assert.rejects(
+    () => sink.ensureTable(poolReturning(0), sink.VITALS_SPEC, settings),
+    /沒有叢集索引.*sink-migrate\.sql/
+  );
+  const d = await sink.ensureTable(poolReturning(1), sink.VITALS_SPEC, settings);
+  assert.equal(d.full, '[dbo].[CDSUnvalidatedData]');
+});
