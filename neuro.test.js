@@ -43,6 +43,21 @@ test('exported intervention JSON round-trips as a unique ID list', () => {
   }
 });
 
+test('resolveSection picks the one section the descriptor instance name points at', () => {
+  const list = 'ECMO #1; ECMO #2; ECMO #3; HeartMate II; HeartMate III; HeartWare; LVAD; RVAD';
+  assert.equal(neuro.resolveSection(list, 'Pump Speed (#1)'), 'ECMO #1');
+  assert.equal(neuro.resolveSection(list, 'Pump Speed (#3)'), 'ECMO #3');
+  assert.equal(neuro.resolveSection(list, 'Pump Speed (LVAD)'), 'LVAD');
+  assert.equal(neuro.resolveSection(list, 'Pump Speed (ECMO #2)'), 'ECMO #2');
+  // 對不到、對到不只一個、沒有 descriptor：維持整串，不猜
+  assert.equal(neuro.resolveSection(list, 'Pump Speed (HM)'), list);
+  assert.equal(neuro.resolveSection(list, 'Pump Speed (VAD)'), list);
+  assert.equal(neuro.resolveSection(list, null), list);
+  // 只有一個區段的項目不看 descriptor
+  assert.equal(neuro.resolveSection('Intake & Output', 'Pump Speed (#1)'), 'Intake & Output');
+  assert.equal(neuro.resolveSection(null, 'Pump Speed (#1)'), null);
+});
+
 test('neuro.interventionIdsFile skips the discovery SQL', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'icca-neuro-'));
   const file = path.join(dir, 'interventions.json');

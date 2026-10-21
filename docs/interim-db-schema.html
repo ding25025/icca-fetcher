@@ -485,7 +485,7 @@
     <dl class="docmeta">
       <div><dt>版本</dt><dd>v0.3（草案）</dd></div>
       <div><dt>日期</dt><dd>2026-08-06</dd></div>
-      <div><dt>最後更新</dt><dd>2026-10-20</dd></div>
+      <div><dt>最後更新</dt><dd>2026-10-21</dd></div>
       <div><dt>作者</dt><dd>Vicky Wu</dd></div>
       <div><dt>資料來源</dt><dd>Philips ICCA</dd></div>
       <div><dt>涵蓋範圍</dt><dd>成人加護病房</dd></div>
@@ -1065,10 +1065,11 @@
                 <td class="type">nvarchar(256)</td>
                 <td class="nul y">是</td>
                 <td>
-                  這個項目掛在 ICCA 表單的<b>哪個區段</b>，例如「神經系統病人生命徵象」、「Intake &amp; Output」。
-                  同一個項目掛在好幾個區段時以「<code>; </code>」相接，例如體外維生表單的 Pump Speed 是
-                  <code>ECMO #1; ECMO #2; ECMO #3; HeartMate II; HeartMate III; HeartWare</code>——
-                  這是該項目在表單上的位置，<b>不代表這一筆填在哪一台機器底下</b>（來源分不出來）。
+                  這一筆填在 ICCA 表單的<b>哪個區段</b>，例如「神經系統病人生命徵象」、「Intake &amp; Output」。
+                  體外維生表單的同一個項目掛在好幾個區段（ECMO #1/#2/#3、HeartMate II/III、HeartWare、LVAD、RVAD），
+                  這時這一欄是<b>這一筆實際所屬的那一個</b>，例如 <code>ECMO #1</code>、<code>LVAD</code>；
+                  同一位病人同時用兩台機器時，兩台的紀錄靠這一欄分開。
+                  來源判定不出所屬區段時，才會以「<code>; </code>」相接列出全部候選區段。
                   藥物醫囑的列，以及 2026-10 加欄之前寫進來的列，為 <code>NULL</code>。
                 </td>
               </tr>
@@ -1199,8 +1200,9 @@
           第 4、5 列是體溫與 FiO2，<b>不是神經評估但一樣在本表</b>；最後一列是另一位病人的同一個項目
           （同 <code>interventionId</code>、不同 <code>lifetimeNumber</code>）。<br>
           <code>terseForm</code> 是<b>不含單位</b>的值、<code>verboseForm</code> 通常是<b>含單位</b>的完整版本。<br>
-          <code>sectionLabel</code>／<code>documentLabel</code> 是項目在 ICCA 表單上的區段與表單名稱，
-          由 <code>interventionId</code> 決定，同一個項目的每一列都一樣。
+          <code>sectionLabel</code>／<code>documentLabel</code> 是這一筆在 ICCA 表單上的區段與表單名稱。
+          <code>documentLabel</code> 由 <code>interventionId</code> 決定，同一個項目的每一列都一樣；
+          <code>sectionLabel</code> 多半也是，只有體外維生表單會依這一筆所屬的機器區段而不同。
         </p>
       </div>
 

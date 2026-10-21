@@ -182,8 +182,9 @@ const GUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
 const upper = (g) => String(g).trim().toUpperCase();
 
 // 同一個 intervention 可能掛在同一張表單的好幾個區段（體外維生表單的 Pump Speed 同時在
-// ECMO #1/#2/#3、HeartMate II/III、HeartWare 底下），而 PtIntervention 的列分不出來自哪個
-// 區段，所以區段／表單名稱收成「去重後用這個分隔相接」的一個字串，跟著每一筆紀錄寫出去。
+// ECMO #1/#2/#3、HeartMate II/III、HeartWare、LVAD、RVAD 底下）。字典層只知道「掛在哪些區段」，
+// 所以先把區段名收成「去重後用這個分隔相接」的一個字串；撈 PtIntervention 時再用
+// PtDescriptor 的實例名稱（Pump Speed (#1)、Pump Speed (LVAD)）對回其中一個，見 resolveSection。
 const LABEL_SEP = '; ';
 
 const clean = (v) => (v != null && String(v).trim() ? String(v).trim() : null);
@@ -196,6 +197,28 @@ function mergeLabel(existing, incoming) {
     if (v && !parts.includes(v)) parts.push(v);
   }
   return parts.length ? parts.join(LABEL_SEP) : null;
+}
+
+/**
+ * 這一筆到底填在哪個區段。PtIntervention 帶著 ptDescriptorId，PtDescriptor.terseForm 是
+ * 「Pump Speed (#1)」「Pump Speed (LVAD)」這種實例名稱，括號裡的字對得上區段名的結尾
+ * （#1 → ECMO #1、LVAD → LVAD）。只有一個區段的項目直接回那個區段；多區段但對不到
+ * （或對到不只一個）時維持整串，寧可多給也不要猜錯。
+ */
+function resolveSection(sectionList, descriptorLabel) {
+  if (!sectionList) return null;
+  const sections = sectionList.split(LABEL_SEP);
+  if (sections.length < 2) return sectionList;
+  const text = clean(descriptorLabel);
+  if (!text) return sectionList;
+  const m = /\(([^()]*)\)\s*$/.exec(text);
+  const hint = (m ? m[1] : text).trim().toLowerCase();
+  if (!hint) return sectionList;
+  const exact = sections.filter((s) => s.toLowerCase() === hint);
+  if (exact.length === 1) return exact[0];
+  const ends = sections.filter((s) => s.toLowerCase().endsWith(hint));
+  if (ends.length === 1) return ends[0];
+  return sectionList;
 }
 
 /** 空的對照表：ids 是原字串 GUID，其餘三個都是「大寫 GUID → 字串」 */
@@ -364,18 +387,22 @@ function buildNeuroQuery(interventionIds, encounterIds, cfg) {
 ${batchPrelude(cfg)}
 
 SELECT
-     ptEncounterId
-    ,interventionId
-    ,terseForm
-    ,verboseForm
-    ,storeTime
-    ,chartTime
-    ,isDeleted
-FROM dbo.[${table}] WITH (NOLOCK)
-WHERE storeTime >= DATEADD(MINUTE, -@win, GETUTCDATE())
-  AND interventionId IN (${iParams})
-  AND ptEncounterId  IN (${eParams})
-ORDER BY ptEncounterId, storeTime DESC`;
+     pi.ptEncounterId
+    ,pi.interventionId
+    ,pi.terseForm
+    ,pi.verboseForm
+    ,pi.storeTime
+    ,pi.chartTime
+    ,pi.isDeleted
+    ,d.terseForm AS descriptorLabel
+FROM dbo.[${table}] pi WITH (NOLOCK)
+-- 實例名稱（Pump Speed (#1)）：同一個項目掛在多個區段時靠它分辨這一筆是哪個區段的。
+-- ptDescriptorId 是 PtDescriptor 的主鍵，一對一，不會把列數撐多。
+LEFT JOIN dbo.PtDescriptor d WITH (NOLOCK) ON d.ptDescriptorId = pi.ptDescriptorId
+WHERE pi.storeTime >= DATEADD(MINUTE, -@win, GETUTCDATE())
+  AND pi.interventionId IN (${iParams})
+  AND pi.ptEncounterId  IN (${eParams})
+ORDER BY pi.ptEncounterId, pi.storeTime DESC`;
 }
 
 /**
@@ -624,6 +651,8 @@ async function collect(opts = {}, prep = null) {
   // 區段／表單名是 interventionId 的函數（來自 Query 1）；藥物醫囑的列不在清單裡，所以是 null
   const sectionOf = (id) => interventions.sections[upper(id)] || null;
   const documentOf = (id) => interventions.documents[upper(id)] || null;
+  // 多區段的項目對不回單一區段時記下來，一輪印一次，之後要補對照規則看這裡
+  const unresolved = new Map();
   const useUtc = args.utc || settings.timesInUtc;
   // 同一個病人（ptEncounterId）的紀錄收在一起：{ lifetimeNumber, bed, records:[] }
   const byPatient = new Map();
@@ -651,7 +680,15 @@ async function collect(opts = {}, prep = null) {
       const rec = {
         interventionId: r.interventionId,
         terseLabel: r.terseLabel != null ? String(r.terseLabel).trim() : labelOf(r.interventionId),
-        sectionLabel: sectionOf(r.interventionId),
+        sectionLabel: (() => {
+          const list = sectionOf(r.interventionId);
+          const one = resolveSection(list, r.descriptorLabel);
+          if (list && one === list && list.includes(LABEL_SEP)) {
+            const k = `${labelOf(r.interventionId) || r.interventionId} ← ${clean(r.descriptorLabel) || '(無 descriptor)'}`;
+            unresolved.set(k, (unresolved.get(k) || 0) + 1);
+          }
+          return one;
+        })(),
         documentLabel: documentOf(r.interventionId),
         terseForm: r.terseForm,
         verboseForm: r.verboseForm,
@@ -698,6 +735,11 @@ async function collect(opts = {}, prep = null) {
   // 病人依床號排序（沒床的排最後），跨分片合併後才看得出病房順序。
   // 用 vitals.js 那支自然排序，ICU-10 才不會排到 ICU-2 前面，兩支輸出順序也一致。
   const merged = [...byPatient.values()].sort((a, b) => V.compareBeds(a.bed, b.bed));
+
+  if (unresolved.size) {
+    console.warn(`  ⚠ ${unresolved.size} 種實例名稱對不回單一區段，sectionLabel 寫入整串候選：`);
+    for (const [k, n] of unresolved) console.warn(`      ${k}（${n} 筆）`);
+  }
 
   return { settings, offset, summary, rows: merged, byCharting, total, groups: groups.length, failures, primaryDatabase: pr.database };
 }
@@ -799,6 +841,7 @@ module.exports = {
   indexInterventions,
   interventionIdsJson,
   loadIdsFile,
+  resolveSection,
   discoverInterventions,
   indexEncounters,
   buildChartingConn,

@@ -209,7 +209,8 @@ const NEURO_SPEC = {
     // sectionLabel / documentLabel，neuro.js 依 interventionId 併上去）。
     // 它們是 interventionId 的函數、不是這筆紀錄本身的內容，所以不進 rowHash（hash: false）：
     // 加這兩欄不會讓既有的列全部被當成「新內容」再寫一次。
-    // 同一個 intervention 掛在好幾個區段時（體外維生表單的 Pump Speed）用「; 」相接；
+    // 同一個 intervention 掛在好幾個區段時（體外維生表單的 Pump Speed），neuro.js 先用
+    // PtDescriptor 的實例名稱對回其中一個區段，對不到才用「; 」把候選區段相接；
     // 藥物醫囑的列不在清單裡、加欄之前寫進去的列也沒有值，這兩種都是 NULL。
     { name: 'sectionLabel', type: 'NVARCHAR(256)', kind: 'text', hash: false },
     { name: 'documentLabel', type: 'NVARCHAR(128)', kind: 'text', hash: false },

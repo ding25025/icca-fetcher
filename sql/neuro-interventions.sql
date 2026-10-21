@@ -38,7 +38,9 @@
  * 同時把區段與表單名稱帶出來當 sectionLabel / documentLabel，方便肉眼核對。
  *
  * 組別 12 只綁到 Document，不篩 fs.displayLabel（整張表單都收），所以同一個
- *   interventionId 可能帶著不同 sectionLabel 出現多列；neuro.js 會用 GUID 去重。
+ *   interventionId 可能帶著不同 sectionLabel 出現多列；neuro.js 會用 GUID 去重，
+ *   撈 PtIntervention 時再 join PtDescriptor，用實例名稱（Pump Speed (#1)、Pump Speed (LVAD)）
+ *   對回這一筆真正所屬的那個區段。
  *
  * ⚠ FiO2 有三個不同的 terseLabel：FiO2 %（組 5）、FiO2 %.（組 6，多一個句點）、
  *   FiO2（組 12）。下游若用名字比對，三個都要收。
